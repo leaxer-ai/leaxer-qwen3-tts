@@ -77,8 +77,9 @@ struct CodePredictorLayer {
 // Code Predictor weights (acoustic codebook prediction)
 // Predicts all 16 codebook tokens given semantic codes
 struct CodePredictorWeights {
-    // Codec token embedding (for conditioning on semantic codes)
-    struct ggml_tensor * codec_embedding_weight; // [codebook_vocab, hidden_dim]
+    // Codec token embeddings (one per codebook, 16 total)
+    // Each: [hidden_dim, codebook_vocab] = [1024, 2048]
+    struct ggml_tensor * codec_embeddings[16];
 
     // 5 transformer layers
     CodePredictorLayer layers[5];

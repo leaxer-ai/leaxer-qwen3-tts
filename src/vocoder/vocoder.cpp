@@ -381,9 +381,36 @@ static void causal_conv1d(
     }
 }
 
+// Helper to convert F16 tensor data to F32 buffer
+// Returns newly allocated F32 buffer (caller must free)
+static float * convert_f16_to_f32(const struct ggml_tensor * tensor) {
+    if (!tensor) return nullptr;
+
+    // Calculate total number of elements (GGML pads ne[] with 1s for unused dims)
+    int64_t n_elements = tensor->ne[0] * tensor->ne[1] * tensor->ne[2] * tensor->ne[3];
+
+    float * f32_data = (float *)malloc(n_elements * sizeof(float));
+    if (!f32_data) {
+        fprintf(stderr, "Failed to allocate F32 buffer for %lld elements\n", (long long)n_elements);
+        return nullptr;
+    }
+
+    if (tensor->type == GGML_TYPE_F16) {
+        ggml_fp16_to_fp32_row((const ggml_fp16_t *)tensor->data, f32_data, n_elements);
+    } else if (tensor->type == GGML_TYPE_F32) {
+        memcpy(f32_data, tensor->data, n_elements * sizeof(float));
+    } else {
+        fprintf(stderr, "Unsupported tensor type %d for conversion\n", (int)tensor->type);
+        free(f32_data);
+        return nullptr;
+    }
+
+    return f32_data;
+}
+
 // Transposed 1D convolution for upsampling
 // input: [seq_len, in_channels]
-// weight: [in_channels, out_channels, kernel_size]
+// weight: [kernel_size, out_channels, in_channels] - GGML layout (ne[0]=kernel, ne[1]=out_ch, ne[2]=in_ch)
 // bias: [out_channels]
 // output: [seq_len * stride, out_channels]
 static void conv1d_transpose(
@@ -395,9 +422,17 @@ static void conv1d_transpose(
     int64_t in_channels,
     int64_t out_channels,
     int kernel_size,
-    int stride
+    int stride,
+    int64_t output_buffer_size  // For bounds checking
 ) {
     int64_t out_len = seq_len * stride;
+    int64_t required_output_size = out_len * out_channels;
+
+    if (required_output_size > output_buffer_size) {
+        fprintf(stderr, "conv_transpose: output buffer too small! need %lld, have %lld\n",
+                (long long)required_output_size, (long long)output_buffer_size);
+        return;
+    }
 
     // Initialize with bias
     for (int64_t t = 0; t < out_len; t++) {
@@ -407,16 +442,25 @@ static void conv1d_transpose(
     }
 
     // Transposed convolution
+    // GGML layout: weight[i * (out_channels * kernel_size) + o * kernel_size + k]
+    // i.e., for element (k, o, i): data[i * ne[0]*ne[1] + o * ne[0] + k]
+    int64_t weight_stride = out_channels * kernel_size;
+
+    // Full transposed convolution computation
     for (int64_t t_in = 0; t_in < seq_len; t_in++) {
         for (int k = 0; k < kernel_size; k++) {
             int64_t t_out = t_in * stride + k;
             if (t_out >= out_len) continue;
 
             for (int64_t i = 0; i < in_channels; i++) {
-                float in_val = input[t_in * in_channels + i];
+                int64_t in_idx = t_in * in_channels + i;
+                float in_val = input[in_idx];
+
+                int64_t weight_base = i * weight_stride + k;
                 for (int64_t o = 0; o < out_channels; o++) {
-                    // weight layout: [in_channels, out_channels, kernel_size]
-                    output[t_out * out_channels + o] += in_val * weight[(i * out_channels + o) * kernel_size + k];
+                    int64_t w_idx = weight_base + o * kernel_size;
+                    int64_t out_idx = t_out * out_channels + o;
+                    output[out_idx] += in_val * weight[w_idx];
                 }
             }
         }
@@ -430,9 +474,20 @@ void vocoder_full_forward(
     int64_t seq_len,
     const model::VocoderWeights * weights
 ) {
+    // Verify inputs
+    if (!audio_out || !codes || !weights) {
+        fprintf(stderr, "vocoder: null input\n");
+        return;
+    }
+    if (!weights->codebooks) {
+        fprintf(stderr, "vocoder: codebooks is null!\n");
+        return;
+    }
+
     // Allocate buffers
     const int64_t max_seq = seq_len * 480;  // Maximum output length
     const int64_t intermediate_dim = 1024;  // FFN intermediate
+
 
     // Main processing buffers
     float * rvq_sum = (float *)malloc(seq_len * CODEBOOK_DIM * sizeof(float));
@@ -455,9 +510,21 @@ void vocoder_full_forward(
     float * gate_buf = (float *)malloc(seq_len * intermediate_dim * sizeof(float));
     float * up_buf = (float *)malloc(seq_len * intermediate_dim * sizeof(float));
 
-    // Upsample buffers (sizes change per stage)
-    float * upsample_in = (float *)malloc(max_seq * CAUSAL_CONV_OUT * sizeof(float));
-    float * upsample_out = (float *)malloc(max_seq * CAUSAL_CONV_OUT * sizeof(float));
+    // Upsample buffers - compute actual max size needed
+    // After each stage: len*rate, channels/2
+    // Stage 0: 2040*8=16320 * 768 = 12.5M
+    // Stage 1: 16320*5=81600 * 384 = 31.3M
+    // Stage 2: 81600*4=326400 * 192 = 62.7M
+    // Stage 3: 326400*3=979200 * 96 = 94M
+    // Max is stage 3 output: 979200 * 96
+    const int64_t max_upsample_size = max_seq * 96;  // Final stage: audio_len * 96 channels
+    float * upsample_in = (float *)malloc(max_upsample_size * sizeof(float));
+    float * upsample_out = (float *)malloc(max_upsample_size * sizeof(float));
+
+    if (!upsample_in || !upsample_out) {
+        fprintf(stderr, "vocoder: failed to allocate upsample buffers!\n");
+        return;
+    }
 
     // Step 1: RVQ decode - sum all 16 codebook embeddings
     const float * codebooks = (const float *)weights->codebooks->data;
@@ -533,32 +600,56 @@ void vocoder_full_forward(
         int64_t out_len = current_len * stride;
         int64_t out_ch = out_channels[stage];
 
-        // Apply SnakeBeta activation before upsampling
-        snake_beta(upsample_out, upsample_in,
-                   (const float *)weights->upsample_alphas[stage]->data,
-                   (const float *)weights->upsample_betas[stage]->data,
-                   current_len, current_channels);
+        // Check weight tensors
+        if (!weights->upsample_alphas[stage] || !weights->upsample_betas[stage] ||
+            !weights->upsample_weights[stage] || !weights->upsample_biases[stage]) {
+            fprintf(stderr, "  vocoder: upsample weights null at stage %d!\n", stage);
+            return;
+        }
+
+        // Apply SnakeBeta activation before upsampling (convert F16 to F32 if needed)
+        float * alpha_f32 = convert_f16_to_f32(weights->upsample_alphas[stage]);
+        float * beta_f32 = convert_f16_to_f32(weights->upsample_betas[stage]);
+        snake_beta(upsample_out, upsample_in, alpha_f32, beta_f32, current_len, current_channels);
+        free(alpha_f32);
+        free(beta_f32);
+
+        // Convert F16 weights to F32 if needed
+        float * weight_f32 = convert_f16_to_f32(weights->upsample_weights[stage]);
+        float * bias_f32 = convert_f16_to_f32(weights->upsample_biases[stage]);
+
+        if (!weight_f32) {
+            fprintf(stderr, "  vocoder: failed to convert upsample_weights[%d] to F32\n", stage);
+            break;
+        }
 
         // Transposed convolution for upsampling
         conv1d_transpose(upsample_in, upsample_out,
-                         (const float *)weights->upsample_weights[stage]->data,
-                         (const float *)weights->upsample_biases[stage]->data,
+                         weight_f32,
+                         bias_f32,
                          current_len, current_channels, out_ch,
-                         kernel_sizes[stage], stride);
+                         kernel_sizes[stage], stride, max_upsample_size);
+
+        // Free converted weights
+        free(weight_f32);
+        if (bias_f32) free(bias_f32);
 
         current_len = out_len;
         current_channels = out_ch;
     }
 
-    // Step 8: Final SnakeBeta activation
-    snake_beta(upsample_out, upsample_in,
-               (const float *)weights->final_snake_alpha->data,
-               (const float *)weights->final_snake_beta->data,
-               current_len, current_channels);
+    // Step 8: Final SnakeBeta activation (convert F16 to F32 if needed)
+    float * final_alpha_f32 = convert_f16_to_f32(weights->final_snake_alpha);
+    float * final_beta_f32 = convert_f16_to_f32(weights->final_snake_beta);
+    snake_beta(upsample_out, upsample_in, final_alpha_f32, final_beta_f32, current_len, current_channels);
+    free(final_alpha_f32);
+    free(final_beta_f32);
 
     // Step 9: Final convolution (96 -> 1)
-    const float * final_weight = (const float *)weights->final_conv_weight->data;
-    const float * final_bias = (const float *)weights->final_conv_bias->data;
+    float * final_weight_f32 = convert_f16_to_f32(weights->final_conv_weight);
+    float * final_bias_f32 = convert_f16_to_f32(weights->final_conv_bias);
+    const float * final_weight = final_weight_f32;
+    const float * final_bias = final_bias_f32;
 
     for (int64_t t = 0; t < current_len; t++) {
         float sum = final_bias[0];
@@ -575,6 +666,8 @@ void vocoder_full_forward(
     }
 
     // Cleanup
+    free(final_weight_f32);
+    free(final_bias_f32);
     free(rvq_sum);
     free(proj_first);
     free(proj_rest);

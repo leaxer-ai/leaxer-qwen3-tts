@@ -654,8 +654,14 @@ bool load_code_predictor_weights(
             } \
         } while (0)
 
-    // Load codec embedding weight
-    LOAD_TENSOR(weights->codec_embedding_weight, "talker_model_codec_embedding_weight");
+    // Load all 15 codec embedding weights (one per codebook, indices 0-14)
+    // These embed the semantic codes (0) and the 14 additional predicted codebooks (1-14)
+    for (int cb = 0; cb < 15; cb++) {
+        char tensor_name[128];
+        snprintf(tensor_name, sizeof(tensor_name), "talker_code_predictor_model_codec_embedding_%d_weight", cb);
+        LOAD_TENSOR(weights->codec_embeddings[cb], tensor_name);
+    }
+    weights->codec_embeddings[15] = nullptr;  // Not used
 
     // Load all 5 layers
     for (int layer = 0; layer < 5; layer++) {
@@ -808,13 +814,19 @@ bool load_vocoder_weights(
             } \
             size_t t_offset = gguf_get_tensor_offset(gguf_ctx, tid); \
             size_t t_size = gguf_get_tensor_size(gguf_ctx, tid); \
+            size_t tensor_nbytes = ggml_nbytes(tensor_ptr); \
+            if (t_size != tensor_nbytes) { \
+                fprintf(stderr, "VOCODER: Tensor '%s' size mismatch: file=%zu, allocated=%zu\n", \
+                        name, t_size, tensor_nbytes); \
+            } \
             if (fseek(file, data_offset + t_offset, SEEK_SET) != 0) { \
                 fprintf(stderr, "Failed to seek to tensor '%s' data\n", name); \
                 gguf_free(gguf_ctx); \
                 fclose(file); \
                 return false; \
             } \
-            if (fread(tensor_ptr->data, 1, t_size, file) != t_size) { \
+            size_t read_size = (t_size < tensor_nbytes) ? t_size : tensor_nbytes; \
+            if (fread(tensor_ptr->data, 1, read_size, file) != read_size) { \
                 fprintf(stderr, "Failed to read tensor '%s' data\n", name); \
                 gguf_free(gguf_ctx); \
                 fclose(file); \

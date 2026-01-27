@@ -3,7 +3,10 @@
 // Refines codec token predictions across codebook hierarchy
 
 #include "ggml.h"
+#include "ggml-cpu.h"
 #include "common.h"
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace leaxer_qwen {
@@ -98,6 +101,12 @@ struct ggml_tensor * code_pred_transformer_layer(
     V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
     V = ggml_reshape_3d(ctx, V, head_dim, seq_len, num_kv_heads);
 
+    // GQA: expand K and V to match Q's head count (8 KV heads -> 16 Q heads)
+    if (num_kv_heads < num_heads) {
+        K = ggml_repeat(ctx, K, Q);
+        V = ggml_repeat(ctx, V, Q);
+    }
+
     // Compute attention
     struct ggml_tensor * scores = attention_scores(ctx, Q, K);
     struct ggml_tensor * attn_out = attention_output(ctx, scores, V, o_weight);
@@ -117,90 +126,53 @@ struct ggml_tensor * code_pred_transformer_layer(
     return output;
 }
 
-// Code predictor forward pass
-// Takes semantic codes from LLM and generates all 16 codebook tokens per timestep
-// Uses autoregressive generation: each codebook conditions on previous codebooks
-// Input: semantic_codes [seq_len] - semantic code indices from Talker LLM
-// Codec embeddings: 16 embedding tables (one per codebook), each [CODEBOOK_VOCAB, hidden_dim]
-// Output heads: 15 projection heads for acoustic codebooks 1-15
-// Output: [NUM_CODEBOOKS, seq_len] int32 - codebook indices
+// Code predictor forward pass - SIMPLIFIED VERSION
+// For now, skip the transformer and just copy semantic codes to all codebooks
+// This allows testing the vocoder pipeline while we figure out the memory-efficient code predictor
+// TODO: Implement proper code predictor with chunked attention or flash attention
 struct ggml_tensor * code_predictor_forward(
     struct ggml_context * ctx,
     struct ggml_tensor * semantic_codes,
-    struct ggml_tensor ** codec_embeddings,  // Array of 16 embedding tables
+    struct ggml_tensor ** codec_embeddings,  // Array of 15 embedding tables (indices 0-14)
     struct ggml_tensor ** layer_weights,     // Weights for 5 transformer layers
     struct ggml_tensor * output_norm_weight,
     struct ggml_tensor ** output_heads,      // 15 output projection heads (codebooks 1-15)
     int hidden_dim,
     int seq_len) {
 
-    // Step 1: Embed semantic codes using first codebook embedding
-    // semantic_codes: [seq_len] with int32 indices
-    // codec_embeddings[0]: [CODEBOOK_VOCAB, hidden_dim]
-    // Output: [hidden_dim, seq_len]
-    struct ggml_tensor * hidden = ggml_get_rows(ctx, codec_embeddings[0], semantic_codes);
+    (void)codec_embeddings;
+    (void)layer_weights;
+    (void)output_norm_weight;
+    (void)output_heads;
+    (void)hidden_dim;
 
-    // Store all codebook predictions
-    struct ggml_tensor * codebook_predictions[NUM_CODEBOOKS];
+    printf("  [STUB] Using simplified code predictor (semantic codes only)\n");
+    fflush(stdout);
 
-    // Codebook 0 is the semantic code from LLM
-    codebook_predictions[0] = semantic_codes;
+    // Allocate output buffer for all codebook predictions
+    int32_t * all_predictions = (int32_t *)malloc(NUM_CODEBOOKS * seq_len * sizeof(int32_t));
+    if (!all_predictions) {
+        fprintf(stderr, "Error: failed to allocate code predictor output buffer\n");
+        return nullptr;
+    }
 
-    // Step 2: Autoregressive generation for codebooks 1-15
-    // Each codebook prediction conditions on all previous codebook embeddings
-    for (int cb = 1; cb < NUM_CODEBOOKS; cb++) {
-        // Process through 5 transformer layers
-        struct ggml_tensor * layer_output = hidden;
-        for (int layer = 0; layer < CODE_PRED_LAYERS; layer++) {
-            int base_idx = layer * 9;
-            layer_output = code_pred_transformer_layer(
-                ctx,
-                layer_output,
-                layer_weights[base_idx + 0],  // attn_norm_weight
-                layer_weights[base_idx + 1],  // q_weight
-                layer_weights[base_idx + 2],  // k_weight
-                layer_weights[base_idx + 3],  // v_weight
-                layer_weights[base_idx + 4],  // o_weight
-                layer_weights[base_idx + 5],  // ffn_norm_weight
-                layer_weights[base_idx + 6],  // ffn_w1
-                layer_weights[base_idx + 7],  // ffn_w2
-                layer_weights[base_idx + 8]   // ffn_w3
-            );
+    // Copy semantic codes to all 16 codebooks (as placeholder)
+    // This won't produce good audio but will test the vocoder pipeline
+    // Memory layout: [t0_cb0, t0_cb1, ..., t0_cb15, t1_cb0, t1_cb1, ...]
+    // This matches vocoder expectation: codes[t * NUM_CODEBOOKS + cb]
+    const int32_t * semantic_data = (const int32_t *)semantic_codes->data;
+    for (int t = 0; t < seq_len; t++) {
+        for (int cb = 0; cb < NUM_CODEBOOKS; cb++) {
+            all_predictions[t * NUM_CODEBOOKS + cb] = semantic_data[t];
         }
-
-        // Final normalization before projection
-        struct ggml_tensor * normed = ops::rms_norm(ctx, layer_output, output_norm_weight, 1e-6f);
-
-        // Project to vocabulary space for this codebook
-        // output_heads has 15 elements (indices 0-14) for codebooks 1-15
-        // normed: [hidden_dim, seq_len]
-        // logits: [CODEBOOK_VOCAB, seq_len]
-        struct ggml_tensor * logits = ggml_mul_mat(ctx, output_heads[cb - 1], normed);
-
-        // Get argmax along vocab dimension (dim 0)
-        // Result: [seq_len] int32 with codebook indices
-        codebook_predictions[cb] = ggml_argmax(ctx, logits);
-
-        // Add this codebook's embedding to hidden state for next iteration
-        // This is the autoregressive step: next codebook conditions on this one
-        struct ggml_tensor * cb_embedding = ggml_get_rows(ctx, codec_embeddings[cb], codebook_predictions[cb]);
-        hidden = ggml_add(ctx, hidden, cb_embedding);
     }
 
-    // Step 3: Stack all codebook predictions into [NUM_CODEBOOKS, seq_len]
-    struct ggml_tensor * reshaped[NUM_CODEBOOKS];
-    for (int cb = 0; cb < NUM_CODEBOOKS; cb++) {
-        reshaped[cb] = ggml_reshape_2d(ctx, codebook_predictions[cb], seq_len, 1);
-    }
-
-    // Concatenate along dimension 1 to form [seq_len, NUM_CODEBOOKS]
-    struct ggml_tensor * output = reshaped[0];
-    for (int cb = 1; cb < NUM_CODEBOOKS; cb++) {
-        output = ggml_concat(ctx, output, reshaped[cb], 1);
-    }
-
-    // Transpose to get [NUM_CODEBOOKS, seq_len]
-    output = ggml_cont(ctx, ggml_permute(ctx, output, 1, 0, 2, 3));
+    // Create output tensor
+    // Shape: [NUM_CODEBOOKS, seq_len] where ne[0]=NUM_CODEBOOKS is the fast dimension
+    // This matches memory layout: data[t * NUM_CODEBOOKS + cb]
+    struct ggml_tensor * output = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, NUM_CODEBOOKS, seq_len);
+    memcpy(output->data, all_predictions, NUM_CODEBOOKS * seq_len * sizeof(int32_t));
+    free(all_predictions);
 
     return output;
 }

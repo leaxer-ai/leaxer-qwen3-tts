@@ -2,6 +2,7 @@
 // Main CLI entry point
 
 #include "leaxer_qwen.h"
+#include "ggml-cpu.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -280,7 +281,7 @@ float * tts_generate(
     int n_layers,
     struct ggml_tensor * norm_weight,
     struct ggml_tensor * lm_head_weight,
-    struct ggml_tensor * codec_embedding,
+    struct ggml_tensor ** codec_embeddings,  // Array of 16 codec embedding tensors
     struct ggml_tensor ** code_pred_layer_weights,
     struct ggml_tensor * code_pred_norm_weight,
     struct ggml_tensor ** code_pred_output_heads,
@@ -450,6 +451,7 @@ struct leaxer_qwen_context * leaxer_qwen_new_context(
 
     // Create ggml context for inference (temporary tensors)
     // Need enough memory for activations during forward pass
+    // Processing one codebook at a time keeps memory reasonable
     size_t mem_size = 8ULL * 1024 * 1024 * 1024;  // 8GB for activations
     struct ggml_init_params ggml_params = {
         .mem_size   = mem_size,
@@ -565,7 +567,7 @@ float * leaxer_qwen_generate(
         28,  // n_layers
         ctx->model->talker.norm_weight,
         ctx->model->talker.lm_head_weight,
-        ctx->model->code_predictor.codec_embedding_weight,
+        ctx->model->code_predictor.codec_embeddings,
         code_pred_layer_weights,
         ctx->model->code_predictor.norm_weight,
         ctx->model->code_predictor.output_heads,
@@ -668,7 +670,7 @@ int leaxer_qwen_write_wav(
 //   n_layers: number of transformer layers
 //   norm_weight: final layer norm weight
 //   lm_head_weight: output projection weight
-//   codec_embedding: codec embedding table for code predictor [16*2048, hidden_dim]
+//   codec_embeddings: array of 16 codec embedding tensors [hidden_dim, codebook_vocab] each
 //   code_pred_layer_weights: code predictor transformer layer weights
 //   code_pred_norm_weight: code predictor final layer norm
 //   code_pred_output_heads: code predictor output projection heads [15]
@@ -693,7 +695,7 @@ float * tts_generate(
     int n_layers,
     struct ggml_tensor * norm_weight,
     struct ggml_tensor * lm_head_weight,
-    struct ggml_tensor * codec_embedding,
+    struct ggml_tensor ** codec_embeddings,  // Array of 16 codec embedding tensors
     struct ggml_tensor ** code_pred_layer_weights,
     struct ggml_tensor * code_pred_norm_weight,
     struct ggml_tensor ** code_pred_output_heads,
@@ -813,25 +815,12 @@ float * tts_generate(
 
     free(generated_tokens);
 
-    // Split codec_embedding into 16 separate codebook embeddings
-    // codec_embedding: [16*2048, hidden_dim] = [32768, 1024]
-    // Each codebook: [2048, 1024]
-    constexpr int CODEBOOK_VOCAB = 2048;
+    // codec_embeddings is now an array of 16 separate tensors passed in as parameter
+    // Each tensor: [hidden_dim, codebook_vocab] = [1024, 2048]
     constexpr int HIDDEN_DIM = 1024;
-    struct ggml_tensor * codec_embeddings[16];
-    for (int cb = 0; cb < 16; cb++) {
-        size_t offset = cb * CODEBOOK_VOCAB * HIDDEN_DIM * sizeof(float);
-        codec_embeddings[cb] = ggml_view_2d(
-            ctx,
-            codec_embedding,
-            HIDDEN_DIM,
-            CODEBOOK_VOCAB,
-            codec_embedding->nb[1],
-            offset
-        );
-    }
 
     // Run code predictor to generate all 16 codebooks autoregressively
+    // Each codebook is processed and computed separately to save memory
     printf("Running code predictor...\n");
     fflush(stdout);
     struct ggml_tensor * codes = model::code_predictor_forward(
@@ -844,6 +833,14 @@ float * tts_generate(
         HIDDEN_DIM,
         seq_len
     );
+
+    if (!codes) {
+        fprintf(stderr, "Error: code predictor failed\n");
+        *n_samples_out = 0;
+        return nullptr;
+    }
+    printf("Code predictor complete.\n");
+    fflush(stdout);
 
     // Step 5: Run vocoder to generate audio
     // Output audio length: seq_len * 480 (24kHz / 12Hz * 240 samples per token)
