@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <cctype>
 #include <cstring>
+#include <regex>
 
 namespace leaxer_qwen {
 namespace io {
@@ -281,6 +282,78 @@ public:
         return !merges_.empty();
     }
 
+    // Pre-tokenize text using regex to split into chunks before BPE
+    std::vector<std::string> pre_tokenize(const std::string& text) {
+        // Simplified GPT-2 style regex pattern
+        // Matches: contractions, letters+, numbers, spaces, special chars
+        // Pattern: 's|'t|'re|'ve|'m|'ll|'d|[A-Za-z]+|[0-9]|[^\s\w]+|\s+
+        std::regex pattern(
+            "'s|'t|'re|'ve|'m|'ll|'d|"  // Contractions
+            "[A-Za-z]+|"                 // Words (letters)
+            "[0-9]|"                     // Single digits
+            "[^\\s\\w]+|"                // Special chars/punctuation
+            "\\s+"                       // Whitespace
+        );
+
+        std::vector<std::string> chunks;
+        auto words_begin = std::sregex_iterator(text.begin(), text.end(), pattern);
+        auto words_end = std::sregex_iterator();
+
+        for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+            std::smatch match = *i;
+            chunks.push_back(match.str());
+        }
+
+        return chunks;
+    }
+
+    // Apply BPE merges to a single chunk
+    std::vector<std::string> bpe_encode_chunk(const std::string& chunk) {
+        if (chunk.empty()) {
+            return {};
+        }
+
+        // Start with individual bytes
+        std::vector<std::string> word;
+        for (unsigned char c : chunk) {
+            word.push_back(std::string(1, static_cast<char>(c)));
+        }
+
+        if (word.size() == 1) {
+            return word;
+        }
+
+        // Iteratively apply BPE merges
+        while (true) {
+            // Find the pair with the lowest merge rank (highest priority)
+            int best_rank = INT_MAX;
+            int best_pos = -1;
+
+            for (size_t i = 0; i + 1 < word.size(); i++) {
+                auto pair = std::make_pair(word[i], word[i + 1]);
+                auto it = merge_rank_.find(pair);
+                if (it != merge_rank_.end()) {
+                    if (it->second < best_rank) {
+                        best_rank = it->second;
+                        best_pos = static_cast<int>(i);
+                    }
+                }
+            }
+
+            // If no valid merge found, we're done
+            if (best_pos == -1) {
+                break;
+            }
+
+            // Merge the best pair
+            std::string merged = word[best_pos] + word[best_pos + 1];
+            word[best_pos] = merged;
+            word.erase(word.begin() + best_pos + 1);
+        }
+
+        return word;
+    }
+
     std::vector<int32_t> tokenize(const std::string& text) {
         std::vector<int32_t> tokens;
 
@@ -296,66 +369,37 @@ public:
             return tokens;
         }
 
-        // BPE encoding algorithm:
-        // 1. Split text into UTF-8 bytes and convert to token strings
-        std::vector<std::string> word;
-        for (unsigned char c : text) {
-            // Create byte token string (e.g., "a" for 'a', or base vocabulary token)
-            std::string byte_token(1, static_cast<char>(c));
+        // BPE encoding algorithm with regex pre-tokenization:
+        // 1. Pre-tokenize: split text into chunks using regex
+        std::vector<std::string> chunks = pre_tokenize(text);
 
-            // Check if byte exists as token in vocab
-            auto it = token_to_id_.find(byte_token);
-            if (it != token_to_id_.end()) {
-                word.push_back(byte_token);
+        // 2. Apply BPE to each chunk independently
+        for (const auto& chunk : chunks) {
+            std::vector<std::string> bpe_tokens;
+
+            if (merges_loaded_) {
+                bpe_tokens = bpe_encode_chunk(chunk);
             } else {
-                // If single byte not in vocab, use as-is
-                word.push_back(byte_token);
-            }
-        }
-
-        // 2. Iteratively apply BPE merges until no more can be applied
-        if (merges_loaded_ && !word.empty()) {
-            while (true) {
-                // Find the pair with the lowest merge rank (highest priority)
-                int best_rank = INT_MAX;
-                int best_pos = -1;
-
-                for (size_t i = 0; i + 1 < word.size(); i++) {
-                    auto pair = std::make_pair(word[i], word[i + 1]);
-                    auto it = merge_rank_.find(pair);
-                    if (it != merge_rank_.end()) {
-                        if (it->second < best_rank) {
-                            best_rank = it->second;
-                            best_pos = static_cast<int>(i);
-                        }
-                    }
+                // No merges - use byte-level
+                for (unsigned char c : chunk) {
+                    bpe_tokens.push_back(std::string(1, static_cast<char>(c)));
                 }
-
-                // If no valid merge found, we're done
-                if (best_pos == -1) {
-                    break;
-                }
-
-                // Merge the best pair
-                std::string merged = word[best_pos] + word[best_pos + 1];
-                word[best_pos] = merged;
-                word.erase(word.begin() + best_pos + 1);
             }
-        }
 
-        // 3. Convert final tokens to IDs
-        for (const auto& token : word) {
-            auto it = token_to_id_.find(token);
-            if (it != token_to_id_.end()) {
-                tokens.push_back(it->second);
-            } else {
-                // Token not in vocab - try byte-level fallback
-                if (token.length() == 1) {
-                    tokens.push_back(static_cast<int32_t>(static_cast<unsigned char>(token[0])));
+            // 3. Convert tokens to IDs
+            for (const auto& token : bpe_tokens) {
+                auto it = token_to_id_.find(token);
+                if (it != token_to_id_.end()) {
+                    tokens.push_back(it->second);
                 } else {
-                    // Multi-byte token not in vocab - split into bytes
-                    for (unsigned char c : token) {
-                        tokens.push_back(static_cast<int32_t>(c));
+                    // Token not in vocab - use byte value
+                    if (token.length() == 1) {
+                        tokens.push_back(static_cast<int32_t>(static_cast<unsigned char>(token[0])));
+                    } else {
+                        // Multi-byte token not in vocab - split into bytes
+                        for (unsigned char c : token) {
+                            tokens.push_back(static_cast<int32_t>(c));
+                        }
                     }
                 }
             }

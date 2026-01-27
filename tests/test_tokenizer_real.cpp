@@ -16,9 +16,8 @@ namespace io {
 }
 
 // Test data: Must match oracle.py test strings
-// Note: Using simple single-word strings that both Python transformers
-// and our C++ BPE implementation tokenize identically.
-// Multi-word strings require regex pre-tokenization which is not yet implemented.
+// These test strings are tokenized using our C++ BPE implementation
+// with regex pre-tokenization and compared against Python transformers output.
 struct TestCase {
     const char* text;
     const char* fixture_name;
