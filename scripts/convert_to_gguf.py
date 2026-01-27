@@ -45,6 +45,27 @@ except ImportError:
     sys.exit(1)
 
 
+# Linear layer weight suffixes that need transposition
+# PyTorch stores as [out_features, in_features], ggml_mul_mat needs [in_features, out_features]
+TRANSPOSE_SUFFIXES = {
+    # Attention projections
+    "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
+    # FFN/MLP projections
+    "gate_proj.weight", "up_proj.weight", "down_proj.weight",
+    # Output heads
+    "lm_head.weight",
+    # Vocoder-specific projections
+    "output_proj.weight", "input_proj.weight",
+    # FFN alternatives (w1/w2/w3 naming)
+    "w1.weight", "w2.weight", "w3.weight",
+}
+
+
+def should_transpose(name: str) -> bool:
+    """Check if a tensor should be transposed (linear layer weights)."""
+    return any(name.endswith(suffix) for suffix in TRANSPOSE_SUFFIXES)
+
+
 def merge_vocoder_codebooks(state_dict: dict) -> np.ndarray:
     """
     Merge 16 separate codebook tensors into a single [16, 2048, 256] tensor.
@@ -238,6 +259,7 @@ def convert_qwen_tts_to_gguf(
 
     # Convert and add all tensors
     n_converted = 0
+    n_transposed = 0
     for name, tensor in state_dict.items():
         # Convert bfloat16 to float16 (numpy doesn't support bfloat16)
         if tensor.dtype == torch.bfloat16:
@@ -247,6 +269,13 @@ def convert_qwen_tts_to_gguf(
 
         # Convert to numpy
         np_tensor = tensor.cpu().numpy()
+
+        # Transpose linear layer weights: [out, in] -> [in, out]
+        # PyTorch stores as [out_features, in_features], ggml_mul_mat needs inner dims to match
+        # Use ascontiguousarray to ensure the transposed data is actually laid out in memory correctly
+        if should_transpose(name) and len(np_tensor.shape) == 2:
+            np_tensor = np.ascontiguousarray(np_tensor.T)
+            n_transposed += 1
 
         # Convert name: replace dots with underscores and shorten for GGUF compatibility
         # GGML has a 64 character limit for tensor names
@@ -295,7 +324,7 @@ def convert_qwen_tts_to_gguf(
         if n_converted % 50 == 0:
             print(f"  Converted {n_converted} tensors...")
 
-    print(f"Converted {n_converted} tensors total")
+    print(f"Converted {n_converted} tensors total ({n_transposed} transposed)")
 
     # Write GGUF file
     print(f"Writing GGUF file to: {output_path}")
@@ -376,6 +405,7 @@ def convert_vocoder_to_gguf(
 
     # Step 2: Map and convert decoder tensors
     print("Converting decoder tensors...")
+    n_transposed = 0
     for hf_name, gguf_name in tensor_mapping.items():
         if hf_name not in state_dict:
             print(f"  Warning: tensor not found: {hf_name}")
@@ -392,6 +422,13 @@ def convert_vocoder_to_gguf(
         # Convert to numpy
         np_tensor = tensor.cpu().numpy()
 
+        # Transpose linear layer weights: [out, in] -> [in, out]
+        # PyTorch stores as [out_features, in_features], ggml_mul_mat needs inner dims to match
+        # Use ascontiguousarray to ensure the transposed data is actually laid out in memory correctly
+        if should_transpose(hf_name) and len(np_tensor.shape) == 2:
+            np_tensor = np.ascontiguousarray(np_tensor.T)
+            n_transposed += 1
+
         # Determine tensor type
         if np_tensor.dtype == np.float16:
             tensor_type = gguf.GGMLQuantizationType.F16
@@ -405,7 +442,7 @@ def convert_vocoder_to_gguf(
         n_converted += 1
         print(f"  Added: {gguf_name} {np_tensor.shape}")
 
-    print(f"Converted {n_converted} tensors total")
+    print(f"Converted {n_converted} tensors total ({n_transposed} transposed)")
 
     # Write GGUF file
     print(f"Writing GGUF file to: {output_path}")
