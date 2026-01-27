@@ -41,15 +41,9 @@ struct ggml_tensor * snake_beta(
     // Note: ggml might not have sin, so we'll need to implement manually
     // For now, let's use a manual approach
 
-    // Since ggml doesn't have built-in sin, we need to compute manually
-    // Allocate result tensor
+    // ggml doesn't have built-in sin operation.
+    // Use snake_beta_inplace() after graph execution for manual computation.
     struct ggml_tensor * result = ggml_dup(ctx, x);
-
-    // We'll need to compute this manually in the data after graph execution
-    // For now, return a placeholder that we'll compute in a callback
-
-    // Actually, let's implement this with a simple loop-based approach
-    // that gets called after the graph is built
 
     return result;
 }

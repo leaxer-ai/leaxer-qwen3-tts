@@ -163,9 +163,5 @@ struct ggml_tensor * attention_output(
     return output;
 }
 
-// TODO: Implement remaining GQA components
-// Key features:
-// - RoPE position embeddings
-
 } // namespace model
 } // namespace leaxer_qwen

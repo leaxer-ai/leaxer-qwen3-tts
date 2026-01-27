@@ -434,13 +434,5 @@ struct ggml_tensor * get_speaker_embedding(
     return speaker_emb;
 }
 
-// TODO: Implement full TTS model
-// Pipeline:
-// 1. Format prompt: "<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
-// 2. Tokenize text
-// 3. Run through LLM to generate codec tokens
-// 4. Refine with code predictor
-// 5. Decode with vocoder
-
 } // namespace model
 } // namespace leaxer_qwen
