@@ -208,10 +208,10 @@ struct ggml_tensor * gguf_load_tensor(
         return nullptr;
     }
 
-    // Initialize GGUF context (metadata only, no tensor allocation)
+    // Initialize GGUF context with ggml context to auto-create tensors with correct dimensions
     struct gguf_init_params params = {
-        /*.no_alloc =*/ true,
-        /*.ctx      =*/ nullptr,
+        /*.no_alloc =*/ false,
+        /*.ctx      =*/ &ctx,
     };
     struct gguf_context * gguf_ctx = gguf_init_from_file(gguf_path, params);
     if (!gguf_ctx) {
@@ -230,25 +230,18 @@ struct ggml_tensor * gguf_load_tensor(
     }
 
     // Get tensor metadata
-    enum ggml_type tensor_type = gguf_get_tensor_type(gguf_ctx, tensor_id);
     size_t tensor_offset = gguf_get_tensor_offset(gguf_ctx, tensor_id);
     size_t tensor_size = gguf_get_tensor_size(gguf_ctx, tensor_id);
     size_t data_offset = gguf_get_data_offset(gguf_ctx);
 
-    // Create tensor in provided context
-    // Note: This is a simplified version that creates a 1D tensor
-    // A full implementation would parse dimensions from GGUF metadata
-    size_t n_elements = tensor_size / ggml_type_size(tensor_type);
-    struct ggml_tensor * tensor = ggml_new_tensor_1d(ctx, tensor_type, n_elements);
+    // Get tensor that was created by gguf_init_from_file with proper multi-dimensional shape
+    struct ggml_tensor * tensor = ggml_get_tensor(ctx, tensor_name);
     if (!tensor) {
-        fprintf(stderr, "Failed to create tensor in context\n");
+        fprintf(stderr, "Failed to get tensor '%s' from context\n", tensor_name);
         gguf_free(gguf_ctx);
         fclose(file);
         return nullptr;
     }
-
-    // Set tensor name
-    ggml_set_name(tensor, tensor_name);
 
     // Seek to tensor data in file and read
     if (fseek(file, data_offset + tensor_offset, SEEK_SET) != 0) {
