@@ -550,6 +550,8 @@ int generate_tokens(
 }
 
 namespace vocoder {
+struct VocoderTransformerWeights;
+
 void vocoder_decode(
     struct ggml_tensor * dst,
     const struct ggml_tensor * codes,
@@ -558,7 +560,8 @@ void vocoder_decode(
     const struct ggml_tensor ** upsample_alphas,
     const struct ggml_tensor ** upsample_betas,
     int * kernel_sizes,
-    int * paddings);
+    int * paddings,
+    const VocoderTransformerWeights * transformer_weights);
 }
 }
 
@@ -754,7 +757,8 @@ float * tts_generate(
         (const struct ggml_tensor **)upsample_alphas,
         (const struct ggml_tensor **)upsample_betas,
         kernel_sizes,
-        paddings
+        paddings,
+        nullptr  // transformer_weights - not loaded yet
     );
 
     // Step 6: Return audio samples
