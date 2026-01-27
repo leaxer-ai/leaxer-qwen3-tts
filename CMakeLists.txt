@@ -103,6 +103,11 @@ if(LEAXER_QWEN_BUILD_TESTS)
     # add_executable(test_snakebeta tests/test_snakebeta.cpp)
     # target_link_libraries(test_snakebeta PRIVATE leaxer_qwen_lib)
     # add_test(NAME snakebeta COMMAND test_snakebeta)
+
+    # WAV writer test
+    add_executable(test_wav tests/test_wav.cpp)
+    target_link_libraries(test_wav PRIVATE leaxer_qwen_lib)
+    add_test(NAME wav COMMAND test_wav)
 endif()
 
 # Install
