@@ -1,0 +1,48 @@
+# Build outputs
+build/
+out/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+*.lib
+
+# Model files (large)
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+models/
+
+# Test fixtures (generated)
+tests/fixtures/*.bin
+tests/fixtures/*.npy
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Todo
+.todo/
