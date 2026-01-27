@@ -178,16 +178,18 @@ void leaxer_qwen_free_audio(float * audio) {
     free(audio);
 }
 
+// Forward declaration of internal write_wav function
+namespace leaxer_qwen {
+namespace io {
+int write_wav(const char* path, const float* audio, size_t n_samples, int sample_rate);
+}
+}
+
 int leaxer_qwen_write_wav(
     const char * path,
     const float * audio,
     size_t n_samples,
     int sample_rate
 ) {
-    (void)path;
-    (void)audio;
-    (void)n_samples;
-    (void)sample_rate;
-    fprintf(stderr, "[TODO] leaxer_qwen_write_wav not implemented\n");
-    return -1;
+    return leaxer_qwen::io::write_wav(path, audio, n_samples, sample_rate);
 }
