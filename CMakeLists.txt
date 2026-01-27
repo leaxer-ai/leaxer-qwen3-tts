@@ -108,6 +108,11 @@ if(LEAXER_QWEN_BUILD_TESTS)
     add_executable(test_wav tests/test_wav.cpp)
     target_link_libraries(test_wav PRIVATE leaxer_qwen_lib)
     add_test(NAME wav COMMAND test_wav)
+
+    # RMSNorm test
+    add_executable(test_rmsnorm tests/test_rmsnorm.cpp)
+    target_link_libraries(test_rmsnorm PRIVATE leaxer_qwen_lib)
+    add_test(NAME rmsnorm COMMAND test_rmsnorm)
 endif()
 
 # Install
