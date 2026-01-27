@@ -119,6 +119,7 @@ struct ggml_tensor * code_pred_transformer_layer(
 
 // Code predictor forward pass
 // Takes semantic codes from LLM and generates 16 codebook tokens per timestep
+// Uses autoregressive generation: each codebook conditions on previous codebooks
 // Input: semantic_codes [seq_len] - semantic code indices
 // Codec embeddings: 16 embedding tables, each [CODEBOOK_VOCAB, hidden_dim]
 // Output: [NUM_CODEBOOKS, seq_len] int32 - codebook indices
@@ -136,51 +137,56 @@ struct ggml_tensor * code_predictor_forward(
     // semantic_codes: [seq_len] with int32 indices
     // codec_embeddings[0]: [CODEBOOK_VOCAB, hidden_dim]
     // Output: [hidden_dim, seq_len]
-    struct ggml_tensor * embedded = ggml_get_rows(ctx, codec_embeddings[0], semantic_codes);
+    struct ggml_tensor * hidden = ggml_get_rows(ctx, codec_embeddings[0], semantic_codes);
 
-    // Step 2: Process through 5 transformer layers
-    struct ggml_tensor * hidden = embedded;
-    for (int layer = 0; layer < CODE_PRED_LAYERS; layer++) {
-        // Each layer needs: attn_norm, q, k, v, o, ffn_norm, w1, w2, w3
-        // Assuming layer_weights contains these in order (9 tensors per layer)
-        int base_idx = layer * 9;
-        hidden = code_pred_transformer_layer(
-            ctx,
-            hidden,
-            layer_weights[base_idx + 0],  // attn_norm_weight
-            layer_weights[base_idx + 1],  // q_weight
-            layer_weights[base_idx + 2],  // k_weight
-            layer_weights[base_idx + 3],  // v_weight
-            layer_weights[base_idx + 4],  // o_weight
-            layer_weights[base_idx + 5],  // ffn_norm_weight
-            layer_weights[base_idx + 6],  // ffn_w1
-            layer_weights[base_idx + 7],  // ffn_w2
-            layer_weights[base_idx + 8]   // ffn_w3
-        );
-    }
-
-    // Step 3: Final normalization
-    // hidden: [hidden_dim, seq_len]
-    hidden = ops::rms_norm(ctx, hidden, output_norm_weight, 1e-6f);
-
-    // Step 4: Generate predictions for all 16 codebooks
-    // For each codebook, project to vocab space and get argmax
+    // Store all codebook predictions
     struct ggml_tensor * codebook_predictions[NUM_CODEBOOKS];
 
-    for (int cb = 0; cb < NUM_CODEBOOKS; cb++) {
+    // Codebook 0 is the semantic code from LLM
+    codebook_predictions[0] = semantic_codes;
+
+    // Step 2: Autoregressive generation for codebooks 1-15
+    // Each codebook prediction conditions on all previous codebook embeddings
+    for (int cb = 1; cb < NUM_CODEBOOKS; cb++) {
+        // Process through 5 transformer layers
+        struct ggml_tensor * layer_output = hidden;
+        for (int layer = 0; layer < CODE_PRED_LAYERS; layer++) {
+            int base_idx = layer * 9;
+            layer_output = code_pred_transformer_layer(
+                ctx,
+                layer_output,
+                layer_weights[base_idx + 0],  // attn_norm_weight
+                layer_weights[base_idx + 1],  // q_weight
+                layer_weights[base_idx + 2],  // k_weight
+                layer_weights[base_idx + 3],  // v_weight
+                layer_weights[base_idx + 4],  // o_weight
+                layer_weights[base_idx + 5],  // ffn_norm_weight
+                layer_weights[base_idx + 6],  // ffn_w1
+                layer_weights[base_idx + 7],  // ffn_w2
+                layer_weights[base_idx + 8]   // ffn_w3
+            );
+        }
+
+        // Final normalization before projection
+        struct ggml_tensor * normed = ops::rms_norm(ctx, layer_output, output_norm_weight, 1e-6f);
+
         // Project to vocabulary space for this codebook
         // output_heads[cb]: [hidden_dim, CODEBOOK_VOCAB]
-        // hidden: [hidden_dim, seq_len]
+        // normed: [hidden_dim, seq_len]
         // logits: [CODEBOOK_VOCAB, seq_len]
-        struct ggml_tensor * logits = ggml_mul_mat(ctx, output_heads[cb], hidden);
+        struct ggml_tensor * logits = ggml_mul_mat(ctx, output_heads[cb], normed);
 
         // Get argmax along vocab dimension (dim 0)
         // Result: [seq_len] int32 with codebook indices
         codebook_predictions[cb] = ggml_argmax(ctx, logits);
+
+        // Add this codebook's embedding to hidden state for next iteration
+        // This is the autoregressive step: next codebook conditions on this one
+        struct ggml_tensor * cb_embedding = ggml_get_rows(ctx, codec_embeddings[cb], codebook_predictions[cb]);
+        hidden = ggml_add(ctx, hidden, cb_embedding);
     }
 
-    // Step 5: Stack all codebook predictions into [NUM_CODEBOOKS, seq_len]
-    // Reshape each [seq_len] to [seq_len, 1] then concatenate along dim 1
+    // Step 3: Stack all codebook predictions into [NUM_CODEBOOKS, seq_len]
     struct ggml_tensor * reshaped[NUM_CODEBOOKS];
     for (int cb = 0; cb < NUM_CODEBOOKS; cb++) {
         reshaped[cb] = ggml_reshape_2d(ctx, codebook_predictions[cb], seq_len, 1);
@@ -192,11 +198,9 @@ struct ggml_tensor * code_predictor_forward(
         output = ggml_concat(ctx, output, reshaped[cb], 1);
     }
 
-    // Transpose to get [NUM_CODEBOOKS, seq_len] as required
-    // permute(1, 0, 2, 3) swaps first two dimensions
+    // Transpose to get [NUM_CODEBOOKS, seq_len]
     output = ggml_cont(ctx, ggml_permute(ctx, output, 1, 0, 2, 3));
 
-    // Final output: [NUM_CODEBOOKS, seq_len] int32
     return output;
 }
 

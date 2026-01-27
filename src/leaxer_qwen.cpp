@@ -214,6 +214,10 @@ float * tts_generate(
     int n_layers,
     struct ggml_tensor * norm_weight,
     struct ggml_tensor * lm_head_weight,
+    struct ggml_tensor * codec_embedding,
+    struct ggml_tensor ** code_pred_layer_weights,
+    struct ggml_tensor * code_pred_norm_weight,
+    struct ggml_tensor ** code_pred_output_heads,
     struct ggml_tensor * codebooks,
     struct ggml_tensor ** upsample_weights,
     struct ggml_tensor ** upsample_alphas,
@@ -230,6 +234,18 @@ namespace io {
 bool load_talker_weights(const char * gguf_path, struct leaxer_qwen::model::TalkerWeights * weights, struct ggml_context * ctx);
 bool load_code_predictor_weights(const char * gguf_path, struct leaxer_qwen::model::CodePredictorWeights * weights, struct ggml_context * ctx);
 bool load_vocoder_weights(const char * gguf_path, struct leaxer_qwen::model::VocoderWeights * weights, struct ggml_context * ctx);
+}
+
+namespace model {
+struct ggml_tensor * code_predictor_forward(
+    struct ggml_context * ctx,
+    struct ggml_tensor * semantic_codes,
+    struct ggml_tensor ** codec_embeddings,
+    struct ggml_tensor ** layer_weights,
+    struct ggml_tensor * output_norm_weight,
+    struct ggml_tensor ** output_heads,
+    int hidden_dim,
+    int seq_len);
 }
 }
 
@@ -490,6 +506,27 @@ float * leaxer_qwen_generate(
         layer_weights[i * 9 + 8] = ctx->model->talker.layers[i].ffn_down_proj_weight;
     }
 
+    // Prepare code predictor layer weights
+    struct ggml_tensor ** code_pred_layer_weights = (struct ggml_tensor **)malloc(5 * 9 * sizeof(struct ggml_tensor *));
+    if (!code_pred_layer_weights) {
+        fprintf(stderr, "Error: failed to allocate code predictor layer weights array\n");
+        free(layer_weights);
+        *n_samples = 0;
+        return nullptr;
+    }
+
+    for (int i = 0; i < 5; i++) {
+        code_pred_layer_weights[i * 9 + 0] = ctx->model->code_predictor.layers[i].in_ln_weight;
+        code_pred_layer_weights[i * 9 + 1] = ctx->model->code_predictor.layers[i].attn_q_proj_weight;
+        code_pred_layer_weights[i * 9 + 2] = ctx->model->code_predictor.layers[i].attn_k_proj_weight;
+        code_pred_layer_weights[i * 9 + 3] = ctx->model->code_predictor.layers[i].attn_v_proj_weight;
+        code_pred_layer_weights[i * 9 + 4] = ctx->model->code_predictor.layers[i].attn_o_proj_weight;
+        code_pred_layer_weights[i * 9 + 5] = ctx->model->code_predictor.layers[i].post_ln_weight;
+        code_pred_layer_weights[i * 9 + 6] = ctx->model->code_predictor.layers[i].ffn_gate_proj_weight;
+        code_pred_layer_weights[i * 9 + 7] = ctx->model->code_predictor.layers[i].ffn_up_proj_weight;
+        code_pred_layer_weights[i * 9 + 8] = ctx->model->code_predictor.layers[i].ffn_down_proj_weight;
+    }
+
     // Prepare vocoder upsample weights
     struct ggml_tensor ** upsample_weights = ctx->model->vocoder.upsample_weights;
     struct ggml_tensor ** upsample_alphas = ctx->model->vocoder.upsample_alphas;
@@ -504,6 +541,10 @@ float * leaxer_qwen_generate(
         28,  // n_layers
         ctx->model->talker.norm_weight,
         ctx->model->talker.lm_head_weight,
+        ctx->model->code_predictor.codec_embedding_weight,
+        code_pred_layer_weights,
+        ctx->model->code_predictor.norm_weight,
+        ctx->model->code_predictor.output_heads,
         ctx->model->vocoder.codebooks,
         upsample_weights,
         upsample_alphas,
@@ -515,7 +556,9 @@ float * leaxer_qwen_generate(
         n_samples
     );
 
+    free(code_pred_layer_weights);
     free(layer_weights);
+
     return audio;
 }
 
@@ -575,9 +618,7 @@ int leaxer_qwen_write_wav(
 }
 
 // End-to-end TTS generation function
-// Connects: text → tokenize → LLM → vocoder → audio
-// Uses semantic codebook only (first codebook), with acoustic codebooks zeroed.
-// Full code predictor implementation for all 16 codebooks is in code_predictor.cpp.
+// Connects: text → tokenize → LLM → code predictor → vocoder → audio
 //
 // Parameters:
 //   ctx: ggml context with sufficient memory
@@ -587,6 +628,10 @@ int leaxer_qwen_write_wav(
 //   n_layers: number of transformer layers
 //   norm_weight: final layer norm weight
 //   lm_head_weight: output projection weight
+//   codec_embedding: codec embedding table for code predictor [16*2048, hidden_dim]
+//   code_pred_layer_weights: code predictor transformer layer weights
+//   code_pred_norm_weight: code predictor final layer norm
+//   code_pred_output_heads: code predictor output projection heads [16]
 //   codebooks: vocoder codebook embeddings [16, 2048, 512]
 //   upsample_weights: array of 4 upsample layer weights
 //   upsample_alphas: array of 4 alpha parameters
@@ -607,6 +652,10 @@ float * tts_generate(
     int n_layers,
     struct ggml_tensor * norm_weight,
     struct ggml_tensor * lm_head_weight,
+    struct ggml_tensor * codec_embedding,
+    struct ggml_tensor ** code_pred_layer_weights,
+    struct ggml_tensor * code_pred_norm_weight,
+    struct ggml_tensor ** code_pred_output_heads,
     struct ggml_tensor * codebooks,
     struct ggml_tensor ** upsample_weights,
     struct ggml_tensor ** upsample_alphas,
@@ -698,36 +747,54 @@ float * tts_generate(
         return nullptr;
     }
 
-    // Step 4: Convert to vocoder input format
-    // Generated tokens are flat sequence, need to reshape to [16, seq_len]
-    // Uses semantic codebook (first codebook) with acoustic codebooks zeroed.
-    // Full code predictor implementation for all 16 codebooks is in code_predictor.cpp.
+    // Step 4: Run code predictor to generate all 16 codebooks
+    // Convert generated tokens to semantic codes (codebook 0)
     int seq_len = codec_len;
-    struct ggml_tensor * codes = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, seq_len, 16);
-    int32_t * codes_data = (int32_t *)codes->data;
+    struct ggml_tensor * semantic_codes = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq_len);
+    int32_t * semantic_data = (int32_t *)semantic_codes->data;
 
-    // Copy semantic codebook to first row, zero out others
-    for (int cb = 0; cb < 16; cb++) {
-        for (int t = 0; t < seq_len; t++) {
-            if (cb == 0) {
-                // First codebook gets the generated tokens (offset by codec base)
-                // Codec tokens start at vocab_offset (e.g., 151936)
-                // We need to convert to 0-2047 range for codebook lookup
-                constexpr int CODEC_VOCAB_START = 151936;
-                int token = generated_tokens[codec_start + t];
-                int code = token - CODEC_VOCAB_START;
-                // Clamp to valid range
-                if (code < 0) code = 0;
-                if (code >= 2048) code = 2047;
-                codes_data[cb * seq_len + t] = code;
-            } else {
-                // Acoustic codebooks (2-16) are zeroed. Full code predictor in code_predictor.cpp.
-                codes_data[cb * seq_len + t] = 0;
-            }
-        }
+    // Convert token IDs to codebook indices (0-2047)
+    constexpr int CODEC_VOCAB_START = 151936;
+    for (int t = 0; t < seq_len; t++) {
+        int token = generated_tokens[codec_start + t];
+        int code = token - CODEC_VOCAB_START;
+        // Clamp to valid range
+        if (code < 0) code = 0;
+        if (code >= 2048) code = 2047;
+        semantic_data[t] = code;
     }
 
     free(generated_tokens);
+
+    // Split codec_embedding into 16 separate codebook embeddings
+    // codec_embedding: [16*2048, hidden_dim] = [32768, 1024]
+    // Each codebook: [2048, 1024]
+    constexpr int CODEBOOK_VOCAB = 2048;
+    constexpr int HIDDEN_DIM = 1024;
+    struct ggml_tensor * codec_embeddings[16];
+    for (int cb = 0; cb < 16; cb++) {
+        size_t offset = cb * CODEBOOK_VOCAB * HIDDEN_DIM * sizeof(float);
+        codec_embeddings[cb] = ggml_view_2d(
+            ctx,
+            codec_embedding,
+            HIDDEN_DIM,
+            CODEBOOK_VOCAB,
+            codec_embedding->nb[1],
+            offset
+        );
+    }
+
+    // Run code predictor to generate all 16 codebooks autoregressively
+    struct ggml_tensor * codes = model::code_predictor_forward(
+        ctx,
+        semantic_codes,
+        codec_embeddings,
+        code_pred_layer_weights,
+        code_pred_norm_weight,
+        code_pred_output_heads,
+        HIDDEN_DIM,
+        seq_len
+    );
 
     // Step 5: Run vocoder to generate audio
     // Output audio length: seq_len * 480 (24kHz / 12Hz * 240 samples per token)
