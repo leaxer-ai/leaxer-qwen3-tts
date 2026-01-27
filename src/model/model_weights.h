@@ -79,8 +79,9 @@ struct CodePredictorWeights {
     // Final layer normalization
     struct ggml_tensor * norm_weight;            // [hidden_dim] RMSNorm weight
 
-    // Output projection heads (one per codebook)
-    struct ggml_tensor * output_heads[16];       // Each: [hidden_dim, codebook_vocab]
+    // Output projection heads (one per acoustic codebook, 15 total)
+    // First codebook (semantic) is predicted by main Talker LLM
+    struct ggml_tensor * output_heads[15];       // Each: [hidden_dim, codebook_vocab]
 };
 
 // ConvNeXt block weights
@@ -154,6 +155,9 @@ struct Qwen3TTSModel {
     TalkerWeights talker;
     CodePredictorWeights code_predictor;
     VocoderWeights vocoder;
+
+    // Component availability flags
+    bool vocoder_loaded;         // true if vocoder weights were successfully loaded
 
     // ggml context holding the weights
     struct ggml_context * ctx;

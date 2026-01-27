@@ -1,5 +1,5 @@
 // Code Predictor Model
-// 5-layer transformer with 16 output heads (one per codebook)
+// 5-layer transformer with 15 output heads (one per acoustic codebook)
 // Refines codec token predictions across codebook hierarchy
 
 #include "ggml.h"
@@ -118,10 +118,11 @@ struct ggml_tensor * code_pred_transformer_layer(
 }
 
 // Code predictor forward pass
-// Takes semantic codes from LLM and generates 16 codebook tokens per timestep
+// Takes semantic codes from LLM and generates all 16 codebook tokens per timestep
 // Uses autoregressive generation: each codebook conditions on previous codebooks
-// Input: semantic_codes [seq_len] - semantic code indices
-// Codec embeddings: 16 embedding tables, each [CODEBOOK_VOCAB, hidden_dim]
+// Input: semantic_codes [seq_len] - semantic code indices from Talker LLM
+// Codec embeddings: 16 embedding tables (one per codebook), each [CODEBOOK_VOCAB, hidden_dim]
+// Output heads: 15 projection heads for acoustic codebooks 1-15
 // Output: [NUM_CODEBOOKS, seq_len] int32 - codebook indices
 struct ggml_tensor * code_predictor_forward(
     struct ggml_context * ctx,
@@ -129,7 +130,7 @@ struct ggml_tensor * code_predictor_forward(
     struct ggml_tensor ** codec_embeddings,  // Array of 16 embedding tables
     struct ggml_tensor ** layer_weights,     // Weights for 5 transformer layers
     struct ggml_tensor * output_norm_weight,
-    struct ggml_tensor ** output_heads,      // 16 output projection heads
+    struct ggml_tensor ** output_heads,      // 15 output projection heads (codebooks 1-15)
     int hidden_dim,
     int seq_len) {
 
@@ -171,10 +172,10 @@ struct ggml_tensor * code_predictor_forward(
         struct ggml_tensor * normed = ops::rms_norm(ctx, layer_output, output_norm_weight, 1e-6f);
 
         // Project to vocabulary space for this codebook
-        // output_heads[cb]: [hidden_dim, CODEBOOK_VOCAB]
+        // output_heads has 15 elements (indices 0-14) for codebooks 1-15
         // normed: [hidden_dim, seq_len]
         // logits: [CODEBOOK_VOCAB, seq_len]
-        struct ggml_tensor * logits = ggml_mul_mat(ctx, output_heads[cb], normed);
+        struct ggml_tensor * logits = ggml_mul_mat(ctx, output_heads[cb - 1], normed);
 
         // Get argmax along vocab dimension (dim 0)
         // Result: [seq_len] int32 with codebook indices

@@ -137,13 +137,28 @@ def convert_qwen_tts_to_gguf(
         # GGML has a 64 character limit for tensor names
         gguf_name = name.replace(".", "_")
 
-        # Shorten common long prefixes
+        # Shorten common long prefixes to fit GGML 64-char limit
+        # Layer naming
+        gguf_name = gguf_name.replace("talker_code_predictor_model_layers", "talker_cp_l")
         gguf_name = gguf_name.replace("code_predictor_model_layers", "cp_l")
         gguf_name = gguf_name.replace("talker_model_layers", "tk_l")
+
+        # Attention and norm naming
         gguf_name = gguf_name.replace("post_attention_layernorm", "post_ln")
         gguf_name = gguf_name.replace("input_layernorm", "in_ln")
         gguf_name = gguf_name.replace("self_attn", "attn")
+
+        # Embedding naming (handle both conventions)
+        gguf_name = gguf_name.replace("text_embedding", "emb")
         gguf_name = gguf_name.replace("embed_tokens", "emb")
+
+        # FFN/MLP naming - standardize to ffn
+        gguf_name = gguf_name.replace("_mlp_gate_proj", "_ffn_gate_proj")
+        gguf_name = gguf_name.replace("_mlp_up_proj", "_ffn_up_proj")
+        gguf_name = gguf_name.replace("_mlp_down_proj", "_ffn_down_proj")
+
+        # Code predictor output heads
+        gguf_name = gguf_name.replace("talker_code_predictor_lm_head", "talker_code_predictor_output_heads")
 
         # Truncate if still too long
         if len(gguf_name) > 63:
