@@ -53,5 +53,54 @@ void codebook_lookup(
     }
 }
 
+// RVQ Decode: Reconstruct latent from all 16 codebooks
+// Input: codes [NUM_CODEBOOKS, seq_len] - int32 indices for each codebook
+// Input: codebooks [NUM_CODEBOOKS, CODEBOOK_SIZE, CODEBOOK_DIM] - all codebook embeddings
+// Output: latent [seq_len, CODEBOOK_DIM] - summed residual vectors
+void rvq_decode(
+    struct ggml_tensor * dst,
+    const struct ggml_tensor * codes,
+    const struct ggml_tensor * codebooks) {
+
+    GGML_ASSERT(codes->type == GGML_TYPE_I32);
+    GGML_ASSERT(codebooks->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    const int32_t * code_data = (const int32_t *)codes->data;
+    const float * codebook_data = (const float *)codebooks->data;
+    float * dst_data = (float *)dst->data;
+
+    const int64_t seq_len = codes->ne[0];
+    const int64_t num_codebooks = codes->ne[1];
+    const int64_t codebook_dim = codebooks->ne[0];
+    const int64_t codebook_size = codebooks->ne[1];
+
+    GGML_ASSERT(num_codebooks == NUM_CODEBOOKS);
+    GGML_ASSERT(dst->ne[0] == codebook_dim);
+    GGML_ASSERT(dst->ne[1] == seq_len);
+
+    // Initialize output to zero
+    const int64_t total_elements = seq_len * codebook_dim;
+    for (int64_t i = 0; i < total_elements; i++) {
+        dst_data[i] = 0.0f;
+    }
+
+    // Sum contributions from all codebooks
+    for (int64_t cb = 0; cb < num_codebooks; cb++) {
+        const int32_t * cb_codes = code_data + cb * seq_len;
+        const float * cb_embedding = codebook_data + cb * codebook_size * codebook_dim;
+
+        for (int64_t t = 0; t < seq_len; t++) {
+            int32_t idx = cb_codes[t];
+            GGML_ASSERT(idx >= 0 && idx < codebook_size);
+
+            // Add residual from this codebook to output
+            for (int64_t d = 0; d < codebook_dim; d++) {
+                dst_data[t * codebook_dim + d] += cb_embedding[idx * codebook_dim + d];
+            }
+        }
+    }
+}
+
 } // namespace vocoder
 } // namespace leaxer_qwen
