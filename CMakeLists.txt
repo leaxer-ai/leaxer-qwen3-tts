@@ -118,6 +118,11 @@ if(LEAXER_QWEN_BUILD_TESTS)
     add_executable(test_conv1d tests/test_conv1d.cpp)
     target_link_libraries(test_conv1d PRIVATE leaxer_qwen_lib)
     add_test(NAME conv1d COMMAND test_conv1d)
+
+    # Tokenizer test
+    add_executable(test_tokenizer tests/test_tokenizer.cpp)
+    target_link_libraries(test_tokenizer PRIVATE leaxer_qwen_lib)
+    add_test(NAME tokenizer COMMAND test_tokenizer)
 endif()
 
 # Install
