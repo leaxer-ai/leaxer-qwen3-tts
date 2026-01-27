@@ -45,6 +45,121 @@ except ImportError:
     sys.exit(1)
 
 
+def merge_vocoder_codebooks(state_dict: dict) -> np.ndarray:
+    """
+    Merge 16 separate codebook tensors into a single [16, 2048, 256] tensor.
+
+    HuggingFace format:
+    - decoder.quantizer.rvq_first.vq.layers.0._codebook.embedding_sum → codebook 0
+    - decoder.quantizer.rvq_rest.vq.layers.{0-14}._codebook.embedding_sum → codebooks 1-15
+
+    Returns:
+        np.ndarray of shape [16, 2048, 256] in float16
+    """
+    codebooks = []
+
+    # Codebook 0: from rvq_first
+    first_key = "decoder.quantizer.rvq_first.vq.layers.0._codebook.embedding_sum"
+    if first_key not in state_dict:
+        raise KeyError(f"Missing codebook tensor: {first_key}")
+
+    tensor = state_dict[first_key]
+    if tensor.dtype == torch.bfloat16:
+        tensor = tensor.to(torch.float16)
+    codebooks.append(tensor.cpu().numpy())
+
+    # Codebooks 1-15: from rvq_rest
+    for i in range(15):
+        rest_key = f"decoder.quantizer.rvq_rest.vq.layers.{i}._codebook.embedding_sum"
+        if rest_key not in state_dict:
+            raise KeyError(f"Missing codebook tensor: {rest_key}")
+
+        tensor = state_dict[rest_key]
+        if tensor.dtype == torch.bfloat16:
+            tensor = tensor.to(torch.float16)
+        codebooks.append(tensor.cpu().numpy())
+
+    # Stack into [16, 2048, 256]
+    merged = np.stack(codebooks, axis=0)
+    print(f"  Merged codebooks: {merged.shape} {merged.dtype}")
+    return merged
+
+
+def get_vocoder_tensor_mapping() -> dict:
+    """
+    Build mapping from HuggingFace vocoder tensor names to GGUF names.
+
+    Full vocoder architecture:
+    1. Quantizer output projections (256→512 each)
+    2. Pre-transformer (8 layers, 512-dim internal, with input/output projections)
+    3. Causal conv (1024→1536)
+    4. Upsample stages (1536→768→384→192→96)
+    5. Final conv (96→1)
+
+    Returns:
+        dict mapping HuggingFace tensor name → GGUF tensor name
+    """
+    mapping = {}
+
+    # Quantizer output projections (project codebook outputs before concat)
+    mapping["decoder.quantizer.rvq_first.output_proj.weight"] = "decoder_rvq_first_output_proj_weight"
+    mapping["decoder.quantizer.rvq_rest.output_proj.weight"] = "decoder_rvq_rest_output_proj_weight"
+
+    # Pre-transformer input/output projections
+    mapping["decoder.pre_transformer.input_proj.weight"] = "decoder_pre_transformer_input_proj_weight"
+    mapping["decoder.pre_transformer.input_proj.bias"] = "decoder_pre_transformer_input_proj_bias"
+    mapping["decoder.pre_transformer.output_proj.weight"] = "decoder_pre_transformer_output_proj_weight"
+    mapping["decoder.pre_transformer.output_proj.bias"] = "decoder_pre_transformer_output_proj_bias"
+
+    # Pre-transformer layers (8 layers)
+    for layer in range(8):
+        prefix = f"decoder.pre_transformer.layers.{layer}"
+        out_prefix = f"decoder_pre_transformer_l{layer}"
+
+        # Self-attention
+        mapping[f"{prefix}.self_attn.q_proj.weight"] = f"{out_prefix}_attn_q_weight"
+        mapping[f"{prefix}.self_attn.k_proj.weight"] = f"{out_prefix}_attn_k_weight"
+        mapping[f"{prefix}.self_attn.v_proj.weight"] = f"{out_prefix}_attn_v_weight"
+        mapping[f"{prefix}.self_attn.o_proj.weight"] = f"{out_prefix}_attn_o_weight"
+
+        # MLP
+        mapping[f"{prefix}.mlp.gate_proj.weight"] = f"{out_prefix}_ffn_gate_weight"
+        mapping[f"{prefix}.mlp.up_proj.weight"] = f"{out_prefix}_ffn_up_weight"
+        mapping[f"{prefix}.mlp.down_proj.weight"] = f"{out_prefix}_ffn_down_weight"
+
+        # Layer norms
+        mapping[f"{prefix}.input_layernorm.weight"] = f"{out_prefix}_input_ln_weight"
+        mapping[f"{prefix}.post_attention_layernorm.weight"] = f"{out_prefix}_post_ln_weight"
+
+        # Layer scales (for residual scaling)
+        mapping[f"{prefix}.self_attn_layer_scale.scale"] = f"{out_prefix}_attn_scale"
+        mapping[f"{prefix}.mlp_layer_scale.scale"] = f"{out_prefix}_ffn_scale"
+
+    # Causal convolution (projects pre-transformer output to decoder input)
+    mapping["decoder.decoder.0.conv.weight"] = "decoder_causal_conv_weight"
+    mapping["decoder.decoder.0.conv.bias"] = "decoder_causal_conv_bias"
+
+    # Upsample stages 0-3 (decoder.decoder.1-4 → upsample 0-3)
+    for hf_idx in range(1, 5):
+        gguf_idx = hf_idx - 1
+        # SnakeBeta alpha/beta (activation parameters)
+        mapping[f"decoder.decoder.{hf_idx}.block.0.alpha"] = f"decoder_upsample_{gguf_idx}_alpha"
+        mapping[f"decoder.decoder.{hf_idx}.block.0.beta"] = f"decoder_upsample_{gguf_idx}_beta"
+        # Transposed convolution weight/bias
+        mapping[f"decoder.decoder.{hf_idx}.block.1.conv.weight"] = f"decoder_upsample_{gguf_idx}_weight"
+        mapping[f"decoder.decoder.{hf_idx}.block.1.conv.bias"] = f"decoder_upsample_{gguf_idx}_bias"
+
+    # Final SnakeBeta activation (decoder.decoder.5)
+    mapping["decoder.decoder.5.alpha"] = "decoder_final_snake_alpha"
+    mapping["decoder.decoder.5.beta"] = "decoder_final_snake_beta"
+
+    # Final convolution
+    mapping["decoder.decoder.6.conv.weight"] = "decoder_final_conv_weight"
+    mapping["decoder.decoder.6.conv.bias"] = "decoder_final_conv_bias"
+
+    return mapping
+
+
 def convert_qwen_tts_to_gguf(
     model_path: str,
     output_path: str,
@@ -245,13 +360,29 @@ def convert_vocoder_to_gguf(
     state_dict = safe_load(safetensors_path)
     print(f"Found {len(state_dict)} tensors in safetensors file")
 
-    # Filter only decoder tensors (ignore encoder)
-    decoder_tensors = {k: v for k, v in state_dict.items() if k.startswith("decoder.")}
-    print(f"Found {len(decoder_tensors)} decoder tensors")
-
-    # Convert and add decoder tensors
+    # Get tensor mapping
+    tensor_mapping = get_vocoder_tensor_mapping()
     n_converted = 0
-    for name, tensor in decoder_tensors.items():
+
+    # Step 1: Merge and add codebooks
+    print("Merging codebooks...")
+    merged_codebooks = merge_vocoder_codebooks(state_dict)
+    if use_f16:
+        merged_codebooks = merged_codebooks.astype(np.float16)
+    tensor_type = gguf.GGMLQuantizationType.F16 if use_f16 else gguf.GGMLQuantizationType.F32
+    writer.add_tensor("decoder_codebooks", merged_codebooks, raw_dtype=tensor_type)
+    n_converted += 1
+    print(f"  Added: decoder_codebooks {merged_codebooks.shape}")
+
+    # Step 2: Map and convert decoder tensors
+    print("Converting decoder tensors...")
+    for hf_name, gguf_name in tensor_mapping.items():
+        if hf_name not in state_dict:
+            print(f"  Warning: tensor not found: {hf_name}")
+            continue
+
+        tensor = state_dict[hf_name]
+
         # Convert bfloat16 to float16
         if tensor.dtype == torch.bfloat16:
             tensor = tensor.to(torch.float16)
@@ -260,13 +391,6 @@ def convert_vocoder_to_gguf(
 
         # Convert to numpy
         np_tensor = tensor.cpu().numpy()
-
-        # Convert name: replace dots with underscores
-        gguf_name = name.replace(".", "_")
-
-        # Truncate if too long
-        if len(gguf_name) > 63:
-            gguf_name = gguf_name[:63]
 
         # Determine tensor type
         if np_tensor.dtype == np.float16:
@@ -279,9 +403,7 @@ def convert_vocoder_to_gguf(
 
         writer.add_tensor(gguf_name, np_tensor, raw_dtype=tensor_type)
         n_converted += 1
-
-        if n_converted % 50 == 0:
-            print(f"  Converted {n_converted} tensors...")
+        print(f"  Added: {gguf_name} {np_tensor.shape}")
 
     print(f"Converted {n_converted} tensors total")
 

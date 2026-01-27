@@ -74,23 +74,27 @@ struct ggml_tensor * talker_forward(
     // token_ids: [seq_len]
     // embed_weight: [vocab_size, hidden_dim]
     // Output: [hidden_dim, seq_len]
+    printf("talker_forward: token_ids=[%lld] embed_weight=[%lld,%lld]\n",
+           (long long)token_ids->ne[0],
+           (long long)embed_weight->ne[0], (long long)embed_weight->ne[1]);
+    fflush(stdout);
     struct ggml_tensor * embedded = ggml_get_rows(ctx, embed_weight, token_ids);
 
     // Step 2: Pass through N transformer blocks (28 for 0.6B model)
     // Each block applies RoPE for position encoding
     struct ggml_tensor * hidden = embedded;
     for (int i = 0; i < n_layers; i++) {
-        // Each layer expects 10 weight tensors in order:
+        // Each layer expects 9 weight tensors in order:
         // 0: attn_norm_weight
         // 1: q_weight
         // 2: k_weight
         // 3: v_weight
         // 4: o_weight
         // 5: ffn_norm_weight
-        // 6: ffn_w1
-        // 7: ffn_w2
-        // 8: ffn_w3
-        struct ggml_tensor ** layer_w = &layer_weights[i * 10];
+        // 6: ffn_gate (w1)
+        // 7: ffn_up (w2)
+        // 8: ffn_down (w3)
+        struct ggml_tensor ** layer_w = &layer_weights[i * 9];
 
         hidden = transformer_block(
             ctx,

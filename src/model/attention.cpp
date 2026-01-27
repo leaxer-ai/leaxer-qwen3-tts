@@ -41,6 +41,10 @@ struct ggml_tensor * gqa_q_proj(
     // q_weight: [hidden_dim, num_heads * head_dim]
     // x: [hidden_dim, seq_len, batch]
     // output: [num_heads * head_dim, seq_len, batch]
+    printf("gqa_q_proj: x=[%lld,%lld,%lld] q_weight=[%lld,%lld]\n",
+           (long long)x->ne[0], (long long)x->ne[1], (long long)x->ne[2],
+           (long long)q_weight->ne[0], (long long)q_weight->ne[1]);
+    fflush(stdout);
     struct ggml_tensor * queries = ggml_mul_mat(ctx, q_weight, x);
 
     return queries;

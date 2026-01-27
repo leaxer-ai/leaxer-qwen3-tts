@@ -811,6 +811,59 @@ bool load_vocoder_weights(
     // Load codebooks
     LOAD_TENSOR(weights->codebooks, "decoder_codebooks");
 
+    // Load RVQ output projections
+    LOAD_TENSOR(weights->rvq_first_output_proj, "decoder_rvq_first_output_proj_weight");
+    LOAD_TENSOR(weights->rvq_rest_output_proj, "decoder_rvq_rest_output_proj_weight");
+
+    // Load pre-transformer input/output projections
+    LOAD_TENSOR(weights->pre_transformer_input_proj_weight, "decoder_pre_transformer_input_proj_weight");
+    LOAD_TENSOR(weights->pre_transformer_input_proj_bias, "decoder_pre_transformer_input_proj_bias");
+    LOAD_TENSOR(weights->pre_transformer_output_proj_weight, "decoder_pre_transformer_output_proj_weight");
+    LOAD_TENSOR(weights->pre_transformer_output_proj_bias, "decoder_pre_transformer_output_proj_bias");
+
+    // Load 8 pre-transformer layers
+    for (int layer = 0; layer < 8; layer++) {
+        char tensor_name[128];
+        model::PreTransformerLayer * layer_weights = &weights->pre_transformer_layers[layer];
+
+        // Layer norms
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_input_ln_weight", layer);
+        LOAD_TENSOR(layer_weights->input_ln_weight, tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_post_ln_weight", layer);
+        LOAD_TENSOR(layer_weights->post_ln_weight, tensor_name);
+
+        // Self-attention
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_attn_q_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_q_weight, tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_attn_k_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_k_weight, tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_attn_v_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_v_weight, tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_attn_o_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_o_weight, tensor_name);
+
+        // FFN
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_ffn_gate_weight", layer);
+        LOAD_TENSOR(layer_weights->ffn_gate_weight, tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_ffn_up_weight", layer);
+        LOAD_TENSOR(layer_weights->ffn_up_weight, tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_ffn_down_weight", layer);
+        LOAD_TENSOR(layer_weights->ffn_down_weight, tensor_name);
+
+        // Layer scales
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_attn_scale", layer);
+        LOAD_TENSOR(layer_weights->attn_scale, tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_pre_transformer_l%d_ffn_scale", layer);
+        LOAD_TENSOR(layer_weights->ffn_scale, tensor_name);
+    }
+
     // Load causal conv
     LOAD_TENSOR(weights->causal_conv_weight, "decoder_causal_conv_weight");
     LOAD_TENSOR(weights->causal_conv_bias, "decoder_causal_conv_bias");
@@ -819,22 +872,24 @@ bool load_vocoder_weights(
     for (int stage = 0; stage < 4; stage++) {
         char tensor_name[128];
 
-        // Load upsample weight
-        snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_weight", stage);
-        LOAD_TENSOR(weights->upsample_weights[stage], tensor_name);
-
-        // Load upsample bias
-        snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_bias", stage);
-        LOAD_TENSOR(weights->upsample_biases[stage], tensor_name);
-
-        // Load SnakeBeta alpha (log scale)
+        // Load SnakeBeta alpha/beta (before upsample conv)
         snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_alpha", stage);
         LOAD_TENSOR(weights->upsample_alphas[stage], tensor_name);
 
-        // Load SnakeBeta beta (log scale)
         snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_beta", stage);
         LOAD_TENSOR(weights->upsample_betas[stage], tensor_name);
+
+        // Load upsample conv weight/bias
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_weight", stage);
+        LOAD_TENSOR(weights->upsample_weights[stage], tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_bias", stage);
+        LOAD_TENSOR(weights->upsample_biases[stage], tensor_name);
     }
+
+    // Load final SnakeBeta
+    LOAD_TENSOR(weights->final_snake_alpha, "decoder_final_snake_alpha");
+    LOAD_TENSOR(weights->final_snake_beta, "decoder_final_snake_beta");
 
     // Load final conv
     LOAD_TENSOR(weights->final_conv_weight, "decoder_final_conv_weight");

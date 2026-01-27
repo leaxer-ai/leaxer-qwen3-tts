@@ -105,29 +105,72 @@ struct ConvNeXtWeights {
     struct ggml_tensor * pw_contract_bias;       // [channels]
 };
 
+// Pre-transformer layer weights for vocoder
+// 8 layers with self-attention, FFN, layer norms, and layer scales
+struct PreTransformerLayer {
+    // Layer norms
+    struct ggml_tensor * input_ln_weight;        // [hidden_dim] RMSNorm weight
+    struct ggml_tensor * post_ln_weight;         // [hidden_dim] RMSNorm weight
+
+    // Self-attention (no KV heads, standard attention)
+    struct ggml_tensor * attn_q_weight;          // [hidden_dim, head_dim * num_heads]
+    struct ggml_tensor * attn_k_weight;          // [hidden_dim, head_dim * num_heads]
+    struct ggml_tensor * attn_v_weight;          // [hidden_dim, head_dim * num_heads]
+    struct ggml_tensor * attn_o_weight;          // [head_dim * num_heads, hidden_dim]
+
+    // SwiGLU Feed-Forward Network
+    struct ggml_tensor * ffn_gate_weight;        // [hidden_dim, intermediate_dim]
+    struct ggml_tensor * ffn_up_weight;          // [hidden_dim, intermediate_dim]
+    struct ggml_tensor * ffn_down_weight;        // [intermediate_dim, hidden_dim]
+
+    // Layer scales (for residual scaling)
+    struct ggml_tensor * attn_scale;             // [hidden_dim]
+    struct ggml_tensor * ffn_scale;              // [hidden_dim]
+};
+
 // Vocoder weights (decoder from Tokenizer-12Hz model)
 // Converts codec tokens to 24kHz waveform
+// Full architecture:
+//   1. RVQ decode (codebooks) → 256-dim per codebook
+//   2. Output projections (256→512 each) → concat → 1024-dim
+//   3. Pre-transformer (8 layers, 512-dim internal) with input/output projections
+//   4. Causal conv (1024→1536)
+//   5. Upsample stages (1536→768→384→192→96)
+//   6. Final snake + conv (96→1)
 struct VocoderWeights {
     // RVQ codebook embeddings
-    struct ggml_tensor * codebooks;              // [16, codebook_vocab, codebook_dim]
+    struct ggml_tensor * codebooks;              // [16, codebook_vocab, codebook_dim=256]
 
-    // Initial causal convolution (projects RVQ output)
-    struct ggml_tensor * causal_conv_weight;     // [kernel_size, in_channels, out_channels]
-    struct ggml_tensor * causal_conv_bias;       // [out_channels]
+    // RVQ output projections (project each codebook group output before concat)
+    struct ggml_tensor * rvq_first_output_proj;  // [512, 256, 1] - 1D conv for first codebook
+    struct ggml_tensor * rvq_rest_output_proj;   // [512, 256, 1] - 1D conv for codebooks 1-15
 
-    // ConvNeXt blocks (not used in current pipeline - transformer blocks used instead)
-    ConvNeXtWeights * convnext_blocks;           // Array of ConvNeXt blocks (nullptr if not used)
-    int num_convnext_blocks;                     // Number of ConvNeXt blocks (0 if not used)
+    // Pre-transformer input/output projections
+    struct ggml_tensor * pre_transformer_input_proj_weight;   // [512, 1024] - project concat to transformer dim
+    struct ggml_tensor * pre_transformer_input_proj_bias;     // [512]
+    struct ggml_tensor * pre_transformer_output_proj_weight;  // [1024, 512] - project back to decoder dim
+    struct ggml_tensor * pre_transformer_output_proj_bias;    // [1024]
+
+    // Pre-transformer layers (8 layers)
+    PreTransformerLayer pre_transformer_layers[8];
+
+    // Causal convolution (projects pre-transformer output to upsample input)
+    struct ggml_tensor * causal_conv_weight;     // [7, 1024, 1536]
+    struct ggml_tensor * causal_conv_bias;       // [1536]
 
     // 4-stage progressive upsampling (12Hz → 24kHz)
-    // Each stage: transposed conv + SnakeBeta activation
-    struct ggml_tensor * upsample_weights[4];    // Transposed conv weights
-    struct ggml_tensor * upsample_biases[4];     // Transposed conv biases
+    // Each stage: SnakeBeta activation + transposed conv
     struct ggml_tensor * upsample_alphas[4];     // SnakeBeta alpha (log scale)
     struct ggml_tensor * upsample_betas[4];      // SnakeBeta beta (log scale)
+    struct ggml_tensor * upsample_weights[4];    // Transposed conv weights
+    struct ggml_tensor * upsample_biases[4];     // Transposed conv biases
+
+    // Final SnakeBeta activation
+    struct ggml_tensor * final_snake_alpha;      // [96]
+    struct ggml_tensor * final_snake_beta;       // [96]
 
     // Final projection to waveform
-    struct ggml_tensor * final_conv_weight;      // [kernel_size, channels, 1]
+    struct ggml_tensor * final_conv_weight;      // [7, 96, 1]
     struct ggml_tensor * final_conv_bias;        // [1]
 };
 

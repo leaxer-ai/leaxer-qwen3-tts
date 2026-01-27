@@ -280,12 +280,7 @@ float * tts_generate(
     struct ggml_tensor ** code_pred_layer_weights,
     struct ggml_tensor * code_pred_norm_weight,
     struct ggml_tensor ** code_pred_output_heads,
-    struct ggml_tensor * codebooks,
-    struct ggml_tensor ** upsample_weights,
-    struct ggml_tensor ** upsample_alphas,
-    struct ggml_tensor ** upsample_betas,
-    struct ggml_tensor * final_conv_weight,
-    struct ggml_tensor * final_conv_bias,
+    const leaxer_qwen::model::VocoderWeights * vocoder_weights,
     float temperature,
     int top_k,
     float top_p,
@@ -553,12 +548,7 @@ float * leaxer_qwen_generate(
         return audio;
     }
 
-    // Prepare vocoder upsample weights
-    struct ggml_tensor ** upsample_weights = ctx->model->vocoder.upsample_weights;
-    struct ggml_tensor ** upsample_alphas = ctx->model->vocoder.upsample_alphas;
-    struct ggml_tensor ** upsample_betas = ctx->model->vocoder.upsample_betas;
-
-    // Call tts_generate
+    // Call tts_generate with vocoder weights struct
     float * audio = tts_generate(
         ctx->ctx,
         text,
@@ -571,12 +561,7 @@ float * leaxer_qwen_generate(
         code_pred_layer_weights,
         ctx->model->code_predictor.norm_weight,
         ctx->model->code_predictor.output_heads,
-        ctx->model->vocoder.codebooks,
-        upsample_weights,
-        upsample_alphas,
-        upsample_betas,
-        ctx->model->vocoder.final_conv_weight,
-        ctx->model->vocoder.final_conv_bias,
+        &ctx->model->vocoder,
         params.temperature,
         params.top_k,
         params.top_p,
@@ -621,20 +606,11 @@ int generate_tokens(
 }
 
 namespace vocoder {
-struct VocoderTransformerWeights;
-
-void vocoder_decode(
-    struct ggml_tensor * dst,
-    const struct ggml_tensor * codes,
-    const struct ggml_tensor * codebooks,
-    const struct ggml_tensor ** upsample_weights,
-    const struct ggml_tensor ** upsample_alphas,
-    const struct ggml_tensor ** upsample_betas,
-    int * kernel_sizes,
-    int * paddings,
-    const struct ggml_tensor * final_conv_weight,
-    const struct ggml_tensor * final_conv_bias,
-    const VocoderTransformerWeights * transformer_weights);
+void vocoder_full_forward(
+    float * audio_out,
+    const int32_t * codes,
+    int64_t seq_len,
+    const model::VocoderWeights * weights);
 }
 }
 
@@ -662,12 +638,7 @@ int leaxer_qwen_write_wav(
 //   code_pred_layer_weights: code predictor transformer layer weights
 //   code_pred_norm_weight: code predictor final layer norm
 //   code_pred_output_heads: code predictor output projection heads [15]
-//   codebooks: vocoder codebook embeddings [16, 2048, 512]
-//   upsample_weights: array of 4 upsample layer weights
-//   upsample_alphas: array of 4 alpha parameters
-//   upsample_betas: array of 4 beta parameters
-//   final_conv_weight: final conv weight (optional, can be nullptr)
-//   final_conv_bias: final conv bias (optional, can be nullptr)
+//   vocoder_weights: full vocoder weights struct (codebooks, projections, transformer, upsample)
 //   temperature: sampling temperature
 //   top_k: top-k sampling parameter
 //   top_p: top-p sampling parameter
@@ -688,12 +659,7 @@ float * tts_generate(
     struct ggml_tensor ** code_pred_layer_weights,
     struct ggml_tensor * code_pred_norm_weight,
     struct ggml_tensor ** code_pred_output_heads,
-    struct ggml_tensor * codebooks,
-    struct ggml_tensor ** upsample_weights,
-    struct ggml_tensor ** upsample_alphas,
-    struct ggml_tensor ** upsample_betas,
-    struct ggml_tensor * final_conv_weight,
-    struct ggml_tensor * final_conv_bias,
+    const leaxer_qwen::model::VocoderWeights * vocoder_weights,
     float temperature,
     int top_k,
     float top_p,
@@ -740,6 +706,9 @@ float * tts_generate(
     // Initialize RNG
     uint64_t rng_state = (seed < 0) ? (uint64_t)time(nullptr) : (uint64_t)seed;
 
+    printf("Starting text generation...\n");
+    fflush(stdout);
+
     int n_generated = model::generate_tokens(
         ctx,
         prompt.data(),
@@ -781,6 +750,9 @@ float * tts_generate(
         return nullptr;
     }
 
+    printf("Text generation complete. Generated %d tokens.\n", n_generated);
+    fflush(stdout);
+
     // Step 4: Run code predictor to generate all 16 codebooks
     // Convert generated tokens to semantic codes (codebook 0)
     int seq_len = codec_len;
@@ -819,6 +791,8 @@ float * tts_generate(
     }
 
     // Run code predictor to generate all 16 codebooks autoregressively
+    printf("Running code predictor...\n");
+    fflush(stdout);
     struct ggml_tensor * codes = model::code_predictor_forward(
         ctx,
         semantic_codes,
@@ -843,25 +817,14 @@ float * tts_generate(
         return nullptr;
     }
 
-    struct ggml_tensor * audio_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, audio_len);
-    audio_tensor->data = audio;
-
-    // Upsample configuration
-    int kernel_sizes[] = {16, 10, 8, 6};
-    int paddings[] = {7, 4, 3, 2};
-
-    vocoder::vocoder_decode(
-        audio_tensor,
-        codes,
-        codebooks,
-        (const struct ggml_tensor **)upsample_weights,
-        (const struct ggml_tensor **)upsample_alphas,
-        (const struct ggml_tensor **)upsample_betas,
-        kernel_sizes,
-        paddings,
-        final_conv_weight,
-        final_conv_bias,
-        nullptr  // transformer_weights - not loaded yet
+    // Call full vocoder with all layers
+    printf("Running vocoder (seq_len=%d, audio_len=%zu)...\n", seq_len, audio_len);
+    fflush(stdout);
+    vocoder::vocoder_full_forward(
+        audio,
+        (const int32_t *)codes->data,
+        seq_len,
+        vocoder_weights
     );
 
     // Step 6: Return audio samples
