@@ -465,6 +465,13 @@ bool load_talker_weights(
     // Load embedding weight (supports both naming conventions)
     LOAD_TENSOR_ALT(weights->emb_weight, "talker_model_emb_weight", "talker_model_text_embedding_weight");
 
+    // Load text projection weights (embedding_dim → hidden_dim)
+    // Flow: input(2048) → fc1 → SiLU → fc2 → output(1024)
+    LOAD_TENSOR(weights->text_proj_fc1_weight, "talker_text_projection_linear_fc1_weight");
+    LOAD_TENSOR(weights->text_proj_fc1_bias, "talker_text_projection_linear_fc1_bias");
+    LOAD_TENSOR(weights->text_proj_fc2_weight, "talker_text_projection_linear_fc2_weight");
+    LOAD_TENSOR(weights->text_proj_fc2_bias, "talker_text_projection_linear_fc2_bias");
+
     // Load all 28 layers
     for (int layer = 0; layer < 28; layer++) {
         char tensor_name[128];

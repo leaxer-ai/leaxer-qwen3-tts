@@ -46,18 +46,13 @@ except ImportError:
 
 
 # Linear layer weight suffixes that need transposition
-# PyTorch stores as [out_features, in_features], ggml_mul_mat needs [in_features, out_features]
+# NOTE: After investigation, ggml_mul_mat(W, x) requires W.ne[0] == x.ne[0]
+# PyTorch weight [out, in] stored directly gives ggml [ne0=in, ne1=out]
+# This makes W.ne[0] = in_features, which matches x.ne[0] = in_features
+# Therefore: DO NOT TRANSPOSE linear weights - store as-is from PyTorch
 TRANSPOSE_SUFFIXES = {
-    # Attention projections
-    "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
-    # FFN/MLP projections
-    "gate_proj.weight", "up_proj.weight", "down_proj.weight",
-    # Output heads
-    "lm_head.weight",
-    # Vocoder-specific projections
-    "output_proj.weight", "input_proj.weight",
-    # FFN alternatives (w1/w2/w3 naming)
-    "w1.weight", "w2.weight", "w3.weight",
+    # EMPTY - no weights should be transposed for ggml_mul_mat compatibility
+    # The original comment was incorrect about ggml_mul_mat semantics
 }
 
 

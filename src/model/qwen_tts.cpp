@@ -52,10 +52,12 @@ constexpr int CODEC_BOS_ID = 4197;
 constexpr int CODEC_EOS_ID = 4198;
 
 // Talker Forward Pass (Qwen3-TTS LLM)
-// Architecture: Embedding → 28 Transformer Blocks (with RoPE) → Final Norm → Output Projection
+// Architecture: Embedding → Text Projection → 28 Transformer Blocks (with RoPE) → Final Norm → Output Projection
 // Input: token_ids with shape [seq_len]
 // Weights:
-//   - embed_weight: [vocab_size, hidden_dim] embedding matrix
+//   - embed_weight: [vocab_size, embedding_dim] embedding matrix
+//   - text_proj_fc1_weight, text_proj_fc1_bias: first layer of text projection (embedding_dim → embedding_dim)
+//   - text_proj_fc2_weight, text_proj_fc2_bias: second layer of text projection (embedding_dim → hidden_dim)
 //   - layer_X_*: weights for each transformer layer (X = 0 to n_layers-1)
 //   - norm_weight: [hidden_dim] final RMSNorm weight
 //   - lm_head_weight: [vocab_size, hidden_dim] output projection (semantic codebook)
@@ -65,6 +67,10 @@ struct ggml_tensor * talker_forward(
     struct ggml_context * ctx,
     struct ggml_tensor * token_ids,
     struct ggml_tensor * embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
     struct ggml_tensor ** layer_weights,  // Array of pointers to layer weights
     int n_layers,
     struct ggml_tensor * norm_weight,
@@ -72,17 +78,28 @@ struct ggml_tensor * talker_forward(
 
     // Step 1: Token Embedding
     // token_ids: [seq_len]
-    // embed_weight: [vocab_size, hidden_dim]
-    // Output: [hidden_dim, seq_len]
+    // embed_weight: [vocab_size, embedding_dim=2048]
+    // Output: [embedding_dim, seq_len]
     printf("talker_forward: token_ids=[%lld] embed_weight=[%lld,%lld]\n",
            (long long)token_ids->ne[0],
            (long long)embed_weight->ne[0], (long long)embed_weight->ne[1]);
     fflush(stdout);
     struct ggml_tensor * embedded = ggml_get_rows(ctx, embed_weight, token_ids);
 
-    // Step 2: Pass through N transformer blocks (28 for 0.6B model)
+    // Step 2: Text Projection (embedding_dim=2048 → hidden_dim=1024)
+    // Flow: input(2048) → fc1 → SiLU → fc2 → output(1024)
+    // fc1: linear
+    struct ggml_tensor * proj = ggml_mul_mat(ctx, text_proj_fc1_weight, embedded);
+    proj = ggml_add(ctx, proj, text_proj_fc1_bias);
+    // SiLU activation
+    proj = ggml_silu(ctx, proj);
+    // fc2: linear
+    proj = ggml_mul_mat(ctx, text_proj_fc2_weight, proj);
+    proj = ggml_add(ctx, proj, text_proj_fc2_bias);
+
+    // Step 3: Pass through N transformer blocks (28 for 0.6B model)
     // Each block applies RoPE for position encoding
-    struct ggml_tensor * hidden = embedded;
+    struct ggml_tensor * hidden = proj;
     for (int i = 0; i < n_layers; i++) {
         // Each layer expects 9 weight tensors in order:
         // 0: attn_norm_weight
@@ -126,10 +143,11 @@ struct ggml_tensor * talker_forward(
 }
 
 // LLM Forward Pass (generic version, kept for compatibility)
-// Architecture: Embedding → N Transformer Blocks → Final Norm → Output Projection
+// Architecture: Embedding → Text Projection → N Transformer Blocks → Final Norm → Output Projection
 // Input: token_ids with shape [seq_len]
 // Weights:
-//   - embed_weight: [vocab_size, hidden_dim] embedding matrix
+//   - embed_weight: [vocab_size, embedding_dim] embedding matrix
+//   - text_proj_*: text projection weights (embedding_dim → hidden_dim)
 //   - layer_X_*: weights for each transformer layer (X = 0 to n_layers-1)
 //   - norm_weight: [hidden_dim] final RMSNorm weight
 //   - lm_head_weight: [vocab_size, hidden_dim] output projection
@@ -138,13 +156,20 @@ struct ggml_tensor * llm_forward(
     struct ggml_context * ctx,
     struct ggml_tensor * token_ids,
     struct ggml_tensor * embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
     struct ggml_tensor ** layer_weights,  // Array of pointers to layer weights
     int n_layers,
     struct ggml_tensor * norm_weight,
     struct ggml_tensor * lm_head_weight) {
 
     // Forward to talker_forward (same implementation)
-    return talker_forward(ctx, token_ids, embed_weight, layer_weights, n_layers, norm_weight, lm_head_weight);
+    return talker_forward(ctx, token_ids, embed_weight,
+                          text_proj_fc1_weight, text_proj_fc1_bias,
+                          text_proj_fc2_weight, text_proj_fc2_bias,
+                          layer_weights, n_layers, norm_weight, lm_head_weight);
 }
 
 // Token Sampling
@@ -269,7 +294,8 @@ int sample_token(
 //   - ctx: ggml context for tensor operations
 //   - prompt_tokens: initial prompt token IDs [prompt_len]
 //   - prompt_len: length of prompt
-//   - embed_weight: embedding weights [vocab_size, hidden_dim]
+//   - embed_weight: embedding weights [vocab_size, embedding_dim]
+//   - text_proj_*: text projection weights (embedding_dim → hidden_dim)
 //   - layer_weights: array of pointers to transformer layer weights
 //   - n_layers: number of transformer layers
 //   - norm_weight: final normalization weights [hidden_dim]
@@ -287,6 +313,10 @@ int generate_tokens(
     const int * prompt_tokens,
     int prompt_len,
     struct ggml_tensor * embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
     struct ggml_tensor ** layer_weights,
     int n_layers,
     struct ggml_tensor * norm_weight,
@@ -320,6 +350,10 @@ int generate_tokens(
             ctx,
             token_ids,
             embed_weight,
+            text_proj_fc1_weight,
+            text_proj_fc1_bias,
+            text_proj_fc2_weight,
+            text_proj_fc2_bias,
             layer_weights,
             n_layers,
             norm_weight,

@@ -34,7 +34,14 @@ struct TalkerLayer {
 // Talker model weights (LLM component)
 struct TalkerWeights {
     // Token embeddings
-    struct ggml_tensor * emb_weight;             // [vocab_size, hidden_dim]
+    struct ggml_tensor * emb_weight;             // [vocab_size, embedding_dim]
+
+    // Text projection (embedding_dim → hidden_dim)
+    // Flow: input(2048) → fc1 → SiLU → fc2 → output(1024)
+    struct ggml_tensor * text_proj_fc1_weight;   // [embedding_dim, embedding_dim]
+    struct ggml_tensor * text_proj_fc1_bias;     // [embedding_dim]
+    struct ggml_tensor * text_proj_fc2_weight;   // [hidden_dim, embedding_dim]
+    struct ggml_tensor * text_proj_fc2_bias;     // [hidden_dim]
 
     // 28 transformer layers
     TalkerLayer layers[28];

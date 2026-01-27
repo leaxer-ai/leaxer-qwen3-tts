@@ -272,6 +272,10 @@ float * tts_generate(
     struct ggml_context * ctx,
     const char * text,
     struct ggml_tensor * embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
     struct ggml_tensor ** layer_weights,
     int n_layers,
     struct ggml_tensor * norm_weight,
@@ -553,6 +557,10 @@ float * leaxer_qwen_generate(
         ctx->ctx,
         text,
         ctx->model->talker.emb_weight,
+        ctx->model->talker.text_proj_fc1_weight,
+        ctx->model->talker.text_proj_fc1_bias,
+        ctx->model->talker.text_proj_fc2_weight,
+        ctx->model->talker.text_proj_fc2_bias,
         layer_weights,
         28,  // n_layers
         ctx->model->talker.norm_weight,
@@ -592,6 +600,10 @@ int generate_tokens(
     const int * prompt_tokens,
     int prompt_len,
     struct ggml_tensor * embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
     struct ggml_tensor ** layer_weights,
     int n_layers,
     struct ggml_tensor * norm_weight,
@@ -630,6 +642,7 @@ int leaxer_qwen_write_wav(
 //   ctx: ggml context with sufficient memory
 //   text: input text to synthesize
 //   embed_weight: token embedding matrix
+//   text_proj_*: text projection weights (embedding_dim → hidden_dim)
 //   layer_weights: array of pointers to transformer layer weights
 //   n_layers: number of transformer layers
 //   norm_weight: final layer norm weight
@@ -651,6 +664,10 @@ float * tts_generate(
     struct ggml_context * ctx,
     const char * text,
     struct ggml_tensor * embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
     struct ggml_tensor ** layer_weights,
     int n_layers,
     struct ggml_tensor * norm_weight,
@@ -714,6 +731,10 @@ float * tts_generate(
         prompt.data(),
         (int)prompt.size(),
         embed_weight,
+        text_proj_fc1_weight,
+        text_proj_fc1_bias,
+        text_proj_fc2_weight,
+        text_proj_fc2_bias,
         layer_weights,
         n_layers,
         norm_weight,
