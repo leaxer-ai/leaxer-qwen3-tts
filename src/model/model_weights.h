@@ -83,6 +83,27 @@ struct CodePredictorWeights {
     struct ggml_tensor * output_heads[16];       // Each: [hidden_dim, codebook_vocab]
 };
 
+// ConvNeXt block weights
+// Standard ConvNeXt architecture: depthwise conv → layernorm → pointwise expansion → pointwise contraction
+// Currently not used in vocoder pipeline (transformer blocks used instead)
+struct ConvNeXtWeights {
+    // Depthwise 7x1 convolution
+    struct ggml_tensor * dw_conv_weight;         // [kernel_size, channels, 1]
+    struct ggml_tensor * dw_conv_bias;           // [channels]
+
+    // Layer normalization
+    struct ggml_tensor * norm_weight;            // [channels]
+    struct ggml_tensor * norm_bias;              // [channels]
+
+    // Pointwise expansion (channels → 4*channels)
+    struct ggml_tensor * pw_expand_weight;       // [channels, 4*channels]
+    struct ggml_tensor * pw_expand_bias;         // [4*channels]
+
+    // Pointwise contraction (4*channels → channels)
+    struct ggml_tensor * pw_contract_weight;     // [4*channels, channels]
+    struct ggml_tensor * pw_contract_bias;       // [channels]
+};
+
 // Vocoder weights (decoder from Tokenizer-12Hz model)
 // Converts codec tokens to 24kHz waveform
 struct VocoderWeights {
@@ -93,9 +114,9 @@ struct VocoderWeights {
     struct ggml_tensor * causal_conv_weight;     // [kernel_size, in_channels, out_channels]
     struct ggml_tensor * causal_conv_bias;       // [out_channels]
 
-    // ConvNeXt blocks (transformer-like processing)
-    // TODO: Add ConvNeXt block weights when implemented
-    // Each block has: depthwise conv, norm, pointwise conv layers
+    // ConvNeXt blocks (not used in current pipeline - transformer blocks used instead)
+    ConvNeXtWeights * convnext_blocks;           // Array of ConvNeXt blocks (nullptr if not used)
+    int num_convnext_blocks;                     // Number of ConvNeXt blocks (0 if not used)
 
     // 4-stage progressive upsampling (12Hz → 24kHz)
     // Each stage: transposed conv + SnakeBeta activation
