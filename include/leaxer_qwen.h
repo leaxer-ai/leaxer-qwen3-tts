@@ -33,6 +33,7 @@ struct leaxer_qwen_gen_params {
     float   top_p;          // Top-p (nucleus) sampling (default: 0.95)
     int32_t max_tokens;     // Maximum tokens to generate (default: 2048)
     int32_t seed;           // Random seed (-1 for random)
+    const char * speaker;   // Speaker name (default: "aiden")
 };
 
 // Default parameters

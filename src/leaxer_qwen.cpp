@@ -9,6 +9,17 @@
 #include <string>
 #include <vector>
 
+static void print_speakers(void) {
+    printf("Available speakers for CustomVoice model:\n");
+    printf("  aiden   (default)\n");
+    printf("  ryan\n");
+    printf("  serena\n");
+    printf("  vivian\n");
+    printf("  aria\n");
+    printf("  emma\n");
+    printf("  sophia\n");
+}
+
 static void print_usage(const char * progname) {
     printf("Usage: %s [options]\n", progname);
     printf("\n");
@@ -17,6 +28,8 @@ static void print_usage(const char * progname) {
     printf("  -p, --prompt TEXT     Text to synthesize (required)\n");
     printf("  -o, --output PATH     Output WAV file (default: output.wav)\n");
     printf("  -t, --threads N       Number of threads (default: 4)\n");
+    printf("  --speaker NAME        Speaker voice (default: aiden)\n");
+    printf("  --list-speakers       List available speakers and exit\n");
     printf("  --temp FLOAT          Temperature (default: 0.9)\n");
     printf("  --top-k N             Top-k sampling (default: 50)\n");
     printf("  --top-p FLOAT         Top-p sampling (default: 0.95)\n");
@@ -26,6 +39,7 @@ static void print_usage(const char * progname) {
     printf("\n");
     printf("Example:\n");
     printf("  %s -m qwen3-tts-1.7b.gguf -p \"Hello world\" -o hello.wav\n", progname);
+    printf("  %s -m qwen3-tts-1.7b.gguf --speaker ryan -p \"Hello world\"\n", progname);
 }
 
 int main(int argc, char ** argv) {
@@ -33,6 +47,7 @@ int main(int argc, char ** argv) {
     const char * model_path = nullptr;
     const char * prompt = nullptr;
     const char * output_path = "output.wav";
+    const char * speaker = "aiden";
     int n_threads = 4;
     float temperature = 0.9f;
     int top_k = 50;
@@ -50,6 +65,10 @@ int main(int argc, char ** argv) {
             printf("leaxer-qwen version %s\n", leaxer_qwen_version());
             return 0;
         }
+        if (arg == "--list-speakers") {
+            print_speakers();
+            return 0;
+        }
         if ((arg == "-m" || arg == "--model") && i + 1 < argc) {
             model_path = argv[++i];
         } else if ((arg == "-p" || arg == "--prompt") && i + 1 < argc) {
@@ -58,6 +77,8 @@ int main(int argc, char ** argv) {
             output_path = argv[++i];
         } else if ((arg == "-t" || arg == "--threads") && i + 1 < argc) {
             n_threads = std::atoi(argv[++i]);
+        } else if (arg == "--speaker" && i + 1 < argc) {
+            speaker = argv[++i];
         } else if (arg == "--temp" && i + 1 < argc) {
             temperature = std::atof(argv[++i]);
         } else if (arg == "--top-k" && i + 1 < argc) {
@@ -88,6 +109,7 @@ int main(int argc, char ** argv) {
     printf("leaxer-qwen v%s\n", leaxer_qwen_version());
     printf("Model: %s\n", model_path);
     printf("Prompt: %s\n", prompt);
+    printf("Speaker: %s\n", speaker);
     printf("Output: %s\n", output_path);
     printf("Threads: %d\n", n_threads);
     printf("\n");
@@ -117,6 +139,7 @@ int main(int argc, char ** argv) {
     gen_params.top_k = top_k;
     gen_params.top_p = top_p;
     gen_params.seed = seed;
+    gen_params.speaker = speaker;
 
     size_t n_samples = 0;
     float * audio = leaxer_qwen_generate(ctx, prompt, gen_params, &n_samples);
@@ -176,6 +199,7 @@ struct leaxer_qwen_gen_params leaxer_qwen_gen_default_params(void) {
         .top_p       = 0.95f,
         .max_tokens  = 2048,
         .seed        = -1,
+        .speaker     = "aiden",
     };
 }
 
