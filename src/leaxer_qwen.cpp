@@ -450,7 +450,7 @@ struct leaxer_qwen_context * leaxer_qwen_new_context(
 
     // Create ggml context for inference (temporary tensors)
     // Need enough memory for activations during forward pass
-    size_t mem_size = 2ULL * 1024 * 1024 * 1024;  // 2GB for activations
+    size_t mem_size = 8ULL * 1024 * 1024 * 1024;  // 8GB for activations
     struct ggml_init_params ggml_params = {
         .mem_size   = mem_size,
         .mem_buffer = nullptr,
@@ -615,6 +615,27 @@ int generate_tokens(
     int eos_token_id,
     uint64_t * rng_state,
     int * output_tokens);
+
+// Cached version - much faster for autoregressive generation
+int generate_tokens_cached(
+    const int * prompt_tokens,
+    int prompt_len,
+    struct ggml_tensor * embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
+    struct ggml_tensor ** layer_weights,
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight,
+    int max_tokens,
+    float temperature,
+    int top_k,
+    float top_p,
+    int eos_token_id,
+    uint64_t * rng_state,
+    int * output_tokens);
 }
 
 namespace vocoder {
@@ -723,11 +744,10 @@ float * tts_generate(
     // Initialize RNG
     uint64_t rng_state = (seed < 0) ? (uint64_t)time(nullptr) : (uint64_t)seed;
 
-    printf("Starting text generation...\n");
+    printf("Starting text generation (with KV cache)...\n");
     fflush(stdout);
 
-    int n_generated = model::generate_tokens(
-        ctx,
+    int n_generated = model::generate_tokens_cached(
         prompt.data(),
         (int)prompt.size(),
         embed_weight,

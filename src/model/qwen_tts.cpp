@@ -4,9 +4,11 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 #include "common.h"
+#include "kv_cache.h"
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 
 namespace leaxer_qwen {
 
@@ -80,22 +82,28 @@ struct ggml_tensor * talker_forward(
     // token_ids: [seq_len]
     // embed_weight: [vocab_size, embedding_dim=2048]
     // Output: [embedding_dim, seq_len]
-    printf("talker_forward: token_ids=[%lld] embed_weight=[%lld,%lld]\n",
-           (long long)token_ids->ne[0],
-           (long long)embed_weight->ne[0], (long long)embed_weight->ne[1]);
-    fflush(stdout);
     struct ggml_tensor * embedded = ggml_get_rows(ctx, embed_weight, token_ids);
 
     // Step 2: Text Projection (embedding_dim=2048 → hidden_dim=1024)
     // Flow: input(2048) → fc1 → SiLU → fc2 → output(1024)
     // fc1: linear
     struct ggml_tensor * proj = ggml_mul_mat(ctx, text_proj_fc1_weight, embedded);
-    proj = ggml_add(ctx, proj, text_proj_fc1_bias);
+    // Cast bias to F32 if needed (weights may be F16)
+    struct ggml_tensor * fc1_bias = text_proj_fc1_bias;
+    if (text_proj_fc1_bias->type == GGML_TYPE_F16) {
+        fc1_bias = ggml_cast(ctx, text_proj_fc1_bias, GGML_TYPE_F32);
+    }
+    proj = ggml_add(ctx, proj, fc1_bias);
     // SiLU activation
     proj = ggml_silu(ctx, proj);
     // fc2: linear
     proj = ggml_mul_mat(ctx, text_proj_fc2_weight, proj);
-    proj = ggml_add(ctx, proj, text_proj_fc2_bias);
+    // Cast bias to F32 if needed
+    struct ggml_tensor * fc2_bias = text_proj_fc2_bias;
+    if (text_proj_fc2_bias->type == GGML_TYPE_F16) {
+        fc2_bias = ggml_cast(ctx, text_proj_fc2_bias, GGML_TYPE_F32);
+    }
+    proj = ggml_add(ctx, proj, fc2_bias);
 
     // Step 3: Pass through N transformer blocks (28 for 0.6B model)
     // Each block applies RoPE for position encoding
@@ -337,9 +345,30 @@ int generate_tokens(
     int current_len = prompt_len;
 
     // Autoregressive generation loop
+    // Create a fresh context for each forward pass to avoid memory accumulation
+    // Memory scales with sequence length: base + seq_len * per_token
+    // Base ~200MB for model overhead, ~5MB per token for 28 layers
+    size_t mem_base = 256ULL * 1024 * 1024;  // 256MB base
+    size_t mem_per_token = 5ULL * 1024 * 1024;  // 5MB per token
+
     while (current_len < max_tokens) {
+        // Calculate memory needed for this sequence length
+        size_t mem_needed = mem_base + (size_t)current_len * mem_per_token;
+
+        // Create fresh context for this forward pass
+        struct ggml_init_params pass_params = {
+            .mem_size   = mem_needed,
+            .mem_buffer = nullptr,
+            .no_alloc   = false,
+        };
+        struct ggml_context * pass_ctx = ggml_init(pass_params);
+        if (!pass_ctx) {
+            fprintf(stderr, "generate_tokens: Failed to create context for forward pass\n");
+            break;
+        }
+
         // Create tensor for current sequence
-        struct ggml_tensor * token_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, current_len);
+        struct ggml_tensor * token_ids = ggml_new_tensor_1d(pass_ctx, GGML_TYPE_I32, current_len);
         int32_t * token_data = (int32_t *)token_ids->data;
         for (int i = 0; i < current_len; i++) {
             token_data[i] = output_tokens[i];
@@ -347,7 +376,7 @@ int generate_tokens(
 
         // Forward pass through LLM
         struct ggml_tensor * logits = llm_forward(
-            ctx,
+            pass_ctx,
             token_ids,
             embed_weight,
             text_proj_fc1_weight,
@@ -361,18 +390,18 @@ int generate_tokens(
         );
 
         // Build and execute compute graph
-        struct ggml_cgraph * graph = ggml_new_graph(ctx);
+        struct ggml_cgraph * graph = ggml_new_graph(pass_ctx);
         ggml_build_forward_expand(graph, logits);
-        ggml_graph_compute_with_ctx(ctx, graph, 1);  // Single-threaded for now
+        ggml_graph_compute_with_ctx(pass_ctx, graph, 1);  // Single-threaded for now
 
         // Get logits for last position
         // logits shape: [vocab_size, seq_len]
         int vocab_size = logits->ne[0];
-        int seq_len = logits->ne[1];
+        int seq_len_out = logits->ne[1];
         float * logits_data = (float *)logits->data;
 
         // Extract logits for last token position
-        float * last_logits = logits_data + vocab_size * (seq_len - 1);
+        float * last_logits = logits_data + vocab_size * (seq_len_out - 1);
 
         // Sample next token
         int next_token = sample_token(
@@ -384,9 +413,18 @@ int generate_tokens(
             rng_state
         );
 
+        // Free this pass's context before continuing
+        ggml_free(pass_ctx);
+
         // Append to sequence
         output_tokens[current_len] = next_token;
         current_len++;
+
+        // Progress indicator
+        if (current_len % 10 == 0) {
+            printf("  Generated %d tokens...\n", current_len);
+            fflush(stdout);
+        }
 
         // Check for EOS
         if (next_token == eos_token_id) {
@@ -470,6 +508,247 @@ struct ggml_tensor * get_speaker_embedding(
     );
 
     return speaker_emb;
+}
+
+// Forward declaration of cached transformer block
+struct ggml_tensor * transformer_block_cached(
+    struct ggml_context * ctx,
+    struct ggml_tensor * x,
+    struct ggml_tensor * attn_norm_weight,
+    struct ggml_tensor * q_weight,
+    struct ggml_tensor * k_weight,
+    struct ggml_tensor * v_weight,
+    struct ggml_tensor * o_weight,
+    struct ggml_tensor * ffn_norm_weight,
+    struct ggml_tensor * ffn_w1,
+    struct ggml_tensor * ffn_w2,
+    struct ggml_tensor * ffn_w3,
+    int layer_idx,
+    KVCache * kv_cache,
+    int start_pos);
+
+// Talker forward pass with KV caching
+// For prefill: process all tokens, build cache
+// For decode: process single token using cache
+static struct ggml_tensor * talker_forward_cached(
+    struct ggml_context * ctx,
+    struct ggml_tensor * token_ids,
+    struct ggml_tensor * embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
+    struct ggml_tensor ** layer_weights,
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight,
+    KVCache * kv_cache,
+    int start_pos) {
+
+    // Token Embedding
+    struct ggml_tensor * embedded = ggml_get_rows(ctx, embed_weight, token_ids);
+
+    // Text Projection (embedding_dim=2048 -> hidden_dim=1024)
+    struct ggml_tensor * proj = ggml_mul_mat(ctx, text_proj_fc1_weight, embedded);
+    struct ggml_tensor * fc1_bias = text_proj_fc1_bias;
+    if (text_proj_fc1_bias->type == GGML_TYPE_F16) {
+        fc1_bias = ggml_cast(ctx, text_proj_fc1_bias, GGML_TYPE_F32);
+    }
+    proj = ggml_add(ctx, proj, fc1_bias);
+    proj = ggml_silu(ctx, proj);
+    proj = ggml_mul_mat(ctx, text_proj_fc2_weight, proj);
+    struct ggml_tensor * fc2_bias = text_proj_fc2_bias;
+    if (text_proj_fc2_bias->type == GGML_TYPE_F16) {
+        fc2_bias = ggml_cast(ctx, text_proj_fc2_bias, GGML_TYPE_F32);
+    }
+    proj = ggml_add(ctx, proj, fc2_bias);
+
+    // Pass through transformer blocks with caching
+    struct ggml_tensor * hidden = proj;
+    for (int i = 0; i < n_layers; i++) {
+        struct ggml_tensor ** layer_w = &layer_weights[i * 9];
+
+        hidden = transformer_block_cached(
+            ctx,
+            hidden,
+            layer_w[0],  // attn_norm_weight
+            layer_w[1],  // q_weight
+            layer_w[2],  // k_weight
+            layer_w[3],  // v_weight
+            layer_w[4],  // o_weight
+            layer_w[5],  // ffn_norm_weight
+            layer_w[6],  // ffn_w1
+            layer_w[7],  // ffn_w2
+            layer_w[8],  // ffn_w3
+            i,           // layer_idx
+            kv_cache,
+            start_pos
+        );
+    }
+
+    // Final RMSNorm
+    struct ggml_tensor * normalized = ops::rms_norm(ctx, hidden, norm_weight, 1e-6f);
+
+    // Output projection
+    struct ggml_tensor * logits = ggml_mul_mat(ctx, lm_head_weight, normalized);
+
+    return logits;
+}
+
+// Generate tokens with KV caching - much faster!
+// Uses KV cache to avoid recomputing attention for previous tokens
+int generate_tokens_cached(
+    const int * prompt_tokens,
+    int prompt_len,
+    struct ggml_tensor * embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
+    struct ggml_tensor ** layer_weights,
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight,
+    int max_tokens,
+    float temperature,
+    int top_k,
+    float top_p,
+    int eos_token_id,
+    uint64_t * rng_state,
+    int * output_tokens) {
+
+    // Configuration
+    const int num_kv_heads = 8;
+    const int head_dim = 128;
+    const int max_seq_len = max_tokens + 128;  // Allow some extra room
+
+    // Create KV cache
+    KVCache * kv_cache = KVCache::create(n_layers, num_kv_heads, head_dim, max_seq_len);
+    if (!kv_cache) {
+        fprintf(stderr, "generate_tokens_cached: Failed to create KV cache\n");
+        return 0;
+    }
+
+    // Copy prompt tokens to output
+    for (int i = 0; i < prompt_len; i++) {
+        output_tokens[i] = prompt_tokens[i];
+    }
+
+    int current_len = prompt_len;
+
+    // Memory for compute contexts
+    // Prefill needs more memory than decode
+    size_t prefill_mem = 512ULL * 1024 * 1024;  // 512MB for prefill
+    size_t decode_mem = 256ULL * 1024 * 1024;   // 256MB for decode (single token)
+
+    // Phase 1: Prefill - process all prompt tokens
+    printf("  Prefilling %d prompt tokens...\n", prompt_len);
+    fflush(stdout);
+    {
+        struct ggml_init_params params = {
+            .mem_size = prefill_mem,
+            .mem_buffer = nullptr,
+            .no_alloc = false,
+        };
+        struct ggml_context * ctx = ggml_init(params);
+        if (!ctx) {
+            fprintf(stderr, "generate_tokens_cached: Failed to create prefill context\n");
+            KVCache::destroy(kv_cache);
+            return 0;
+        }
+
+        // Create token tensor
+        struct ggml_tensor * token_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, prompt_len);
+        memcpy(token_ids->data, prompt_tokens, prompt_len * sizeof(int32_t));
+
+        // Forward pass
+        struct ggml_tensor * logits = talker_forward_cached(
+            ctx, token_ids, embed_weight,
+            text_proj_fc1_weight, text_proj_fc1_bias,
+            text_proj_fc2_weight, text_proj_fc2_bias,
+            layer_weights, n_layers, norm_weight, lm_head_weight,
+            kv_cache, 0  // start_pos = 0 for prefill
+        );
+
+        // Build and execute graph
+        struct ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, logits);
+        ggml_graph_compute_with_ctx(ctx, graph, 4);  // Use 4 threads
+
+        // Sample first token
+        int vocab_size = logits->ne[0];
+        float * logits_data = (float *)logits->data;
+        float * last_logits = logits_data + vocab_size * (prompt_len - 1);
+
+        int next_token = sample_token(last_logits, vocab_size, temperature, top_k, top_p, rng_state);
+        output_tokens[current_len++] = next_token;
+
+        ggml_free(ctx);
+
+        if (next_token == eos_token_id) {
+            KVCache::destroy(kv_cache);
+            return current_len;
+        }
+    }
+
+    // Phase 2: Decode - generate tokens one at a time
+    printf("  Decoding tokens...\n");
+    fflush(stdout);
+    while (current_len < max_tokens) {
+        struct ggml_init_params params = {
+            .mem_size = decode_mem,
+            .mem_buffer = nullptr,
+            .no_alloc = false,
+        };
+        struct ggml_context * ctx = ggml_init(params);
+        if (!ctx) {
+            fprintf(stderr, "generate_tokens_cached: Failed to create decode context\n");
+            break;
+        }
+
+        // Create tensor for single token
+        struct ggml_tensor * token_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+        ((int32_t *)token_ids->data)[0] = output_tokens[current_len - 1];
+
+        // Forward pass for single token
+        struct ggml_tensor * logits = talker_forward_cached(
+            ctx, token_ids, embed_weight,
+            text_proj_fc1_weight, text_proj_fc1_bias,
+            text_proj_fc2_weight, text_proj_fc2_bias,
+            layer_weights, n_layers, norm_weight, lm_head_weight,
+            kv_cache, current_len - 1  // start_pos = position of new token
+        );
+
+        // Build and execute graph
+        struct ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, logits);
+        ggml_graph_compute_with_ctx(ctx, graph, 4);  // Use 4 threads
+
+        // Sample next token
+        int vocab_size = logits->ne[0];
+        float * logits_data = (float *)logits->data;
+
+        int next_token = sample_token(logits_data, vocab_size, temperature, top_k, top_p, rng_state);
+
+        ggml_free(ctx);
+
+        output_tokens[current_len++] = next_token;
+
+        // Progress indicator
+        if (current_len % 50 == 0) {
+            printf("  Generated %d tokens...\n", current_len);
+            fflush(stdout);
+        }
+
+        // Check for EOS
+        if (next_token == eos_token_id) {
+            break;
+        }
+    }
+
+    KVCache::destroy(kv_cache);
+    printf("  Generated %d tokens total\n", current_len);
+    return current_len;
 }
 
 } // namespace model

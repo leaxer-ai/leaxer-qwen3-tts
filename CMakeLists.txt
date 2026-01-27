@@ -50,6 +50,7 @@ set(MODEL_SOURCES
     src/model/attention.cpp
     src/model/ffn.cpp
     src/model/transformer.cpp
+    src/model/transformer_cached.cpp
     src/model/code_predictor.cpp
     src/model/qwen_tts.cpp
 )

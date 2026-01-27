@@ -22,9 +22,15 @@ struct ggml_tensor * rms_norm(
     // Use ggml's built-in RMS normalization
     struct ggml_tensor * normalized = ggml_rms_norm(ctx, x, eps);
 
+    // Cast weight to F32 if needed (F16 weights cause type mismatch errors)
+    struct ggml_tensor * weight_f32 = weight;
+    if (weight->type == GGML_TYPE_F16) {
+        weight_f32 = ggml_cast(ctx, weight, GGML_TYPE_F32);
+    }
+
     // Scale by weight (element-wise multiplication)
     // Weight needs to be broadcast across the normalized tensor
-    struct ggml_tensor * output = ggml_mul(ctx, normalized, weight);
+    struct ggml_tensor * output = ggml_mul(ctx, normalized, weight_f32);
 
     return output;
 }

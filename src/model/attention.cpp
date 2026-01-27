@@ -21,10 +21,13 @@ struct ggml_tensor * rope_1d(
 
 namespace model {
 
-// Attention configuration
+// Attention configuration (from model config.json)
+// hidden_size=1024, num_attention_heads=16, num_key_value_heads=8
+// head_dim = hidden_size / num_attention_heads = 1024/16 = 64 for Q
+// but Q proj has output 2048 = 16 * 128, so head_dim=128
 constexpr int NUM_HEADS = 16;
-constexpr int NUM_KV_HEADS = 2;
-constexpr int HEAD_DIM = 64;  // hidden_size / num_heads
+constexpr int NUM_KV_HEADS = 8;   // GQA: 8 KV heads shared across 16 Q heads
+constexpr int HEAD_DIM = 128;     // 2048/16 = 128 (Q), 1024/8 = 128 (KV)
 
 // Q projection for GQA
 // Projects input to query vectors for all attention heads
@@ -41,10 +44,6 @@ struct ggml_tensor * gqa_q_proj(
     // q_weight: [hidden_dim, num_heads * head_dim]
     // x: [hidden_dim, seq_len, batch]
     // output: [num_heads * head_dim, seq_len, batch]
-    printf("gqa_q_proj: x=[%lld,%lld,%lld] q_weight=[%lld,%lld]\n",
-           (long long)x->ne[0], (long long)x->ne[1], (long long)x->ne[2],
-           (long long)q_weight->ne[0], (long long)q_weight->ne[1]);
-    fflush(stdout);
     struct ggml_tensor * queries = ggml_mul_mat(ctx, q_weight, x);
 
     return queries;

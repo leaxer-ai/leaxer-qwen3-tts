@@ -521,13 +521,20 @@ bool load_talker_weights(
     // Load final norm weight
     LOAD_TENSOR(weights->norm_weight, "talker_model_norm_weight");
 
-    // Load lm_head weight (may not exist in all models)
+    // Load lm_head weight (also known as codec_head in Qwen3-TTS)
+    // Try multiple possible tensor names for compatibility
     {
-        int64_t tid = gguf_find_tensor(gguf_ctx, "talker_model_lm_head_weight");
+        int64_t tid = gguf_find_tensor(gguf_ctx, "talker_codec_head_weight");
         if (tid >= 0) {
-            LOAD_TENSOR(weights->lm_head_weight, "talker_model_lm_head_weight");
+            LOAD_TENSOR(weights->lm_head_weight, "talker_codec_head_weight");
         } else {
-            weights->lm_head_weight = nullptr;
+            tid = gguf_find_tensor(gguf_ctx, "talker_model_lm_head_weight");
+            if (tid >= 0) {
+                LOAD_TENSOR(weights->lm_head_weight, "talker_model_lm_head_weight");
+            } else {
+                fprintf(stderr, "Warning: lm_head/codec_head weight not found\n");
+                weights->lm_head_weight = nullptr;
+            }
         }
     }
 

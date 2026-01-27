@@ -98,11 +98,17 @@ struct ggml_tensor * transformer_block(
     int q_dim = Q->ne[0];  // num_heads * head_dim
     int kv_dim = K->ne[0];  // num_kv_heads * head_dim
 
-    // For GQA: assume 16 query heads, 8 KV heads, head_dim = 64
-    // These should be parameters, but hardcode for now to match model
+    // For GQA: 16 query heads, 8 KV heads, head_dim = 128
+    // These should be parameters, but hardcode for now to match model config
     const int num_heads = 16;
-    const int num_kv_heads = 16;  // Set to num_heads for now (non-GQA)
-    const int head_dim = q_dim / num_heads;
+    const int num_kv_heads = 8;  // GQA: 8 KV heads shared across 16 Q heads
+    const int head_dim = q_dim / num_heads;  // 2048/16 = 128
+    const int kv_head_dim = kv_dim / num_kv_heads;  // 1024/8 = 128
+
+    // Debug output commented out to reduce noise
+    // printf("transformer_block: Q=[%lld,%lld], K=[%lld,%lld]\n",
+    //        (long long)Q->ne[0], (long long)Q->ne[1],
+    //        (long long)K->ne[0], (long long)K->ne[1]);
 
     // First convert to 4D to separate heads, then permute
     // Q: [num_heads * head_dim, seq_len] = [head_dim, num_heads, seq_len, 1]  (view)
@@ -111,13 +117,26 @@ struct ggml_tensor * transformer_block(
     Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));  // [head_dim, seq_len, num_heads, 1]
     Q = ggml_reshape_3d(ctx, Q, head_dim, seq_len, num_heads);  // Remove singleton dim
 
-    K = ggml_reshape_4d(ctx, K, head_dim, num_kv_heads, seq_len, 1);
+    // K and V use kv_head_dim which should equal head_dim for this model
+    K = ggml_reshape_4d(ctx, K, kv_head_dim, num_kv_heads, seq_len, 1);
     K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
-    K = ggml_reshape_3d(ctx, K, head_dim, seq_len, num_kv_heads);
+    K = ggml_reshape_3d(ctx, K, kv_head_dim, seq_len, num_kv_heads);
 
-    V = ggml_reshape_4d(ctx, V, head_dim, num_kv_heads, seq_len, 1);
+    V = ggml_reshape_4d(ctx, V, kv_head_dim, num_kv_heads, seq_len, 1);
     V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
-    V = ggml_reshape_3d(ctx, V, head_dim, seq_len, num_kv_heads);
+    V = ggml_reshape_3d(ctx, V, kv_head_dim, seq_len, num_kv_heads);
+
+    // GQA: Expand K and V heads to match Q heads
+    // K/V have 8 heads, Q has 16 heads, so repeat K/V heads 2x
+    // This is done by repeating along the heads dimension (dim 2)
+    // Use Q tensor as the shape reference since it already has the target shape
+    const int heads_ratio = num_heads / num_kv_heads;  // 16/8 = 2
+    if (heads_ratio > 1) {
+        // K: [head_dim, seq_len, num_kv_heads] -> [head_dim, seq_len, num_heads]
+        // Use Q as shape reference (Q has shape [head_dim, seq_len, num_heads])
+        K = ggml_repeat(ctx, K, Q);
+        V = ggml_repeat(ctx, V, Q);
+    }
 
     // Compute attention scores
     struct ggml_tensor * scores = attention_scores(ctx, Q, K);
