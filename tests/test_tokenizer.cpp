@@ -88,8 +88,45 @@ bool test_tokenize_unicode() {
     // Test basic ASCII
     auto tokens = leaxer_qwen::io::tokenize("Hi!");
     TEST_ASSERT(!tokens.empty(), "Hi! should produce tokens");
-    printf("    'Hi!' tokenized to %zu tokens\n", tokens.size());
+    printf("    'Hi!' tokenized to %zu tokens: ", tokens.size());
+    for (size_t i = 0; i < tokens.size() && i < 10; i++) {
+        printf("%d ", tokens[i]);
+    }
+    printf("\n");
+
+    // Verify against Python reference: 'Hi!' -> [13048, 0]
+    TEST_ASSERT(tokens.size() == 2, "Hi! should produce 2 tokens");
+    TEST_ASSERT(tokens[0] == 13048, "First token should be 13048");
+    TEST_ASSERT(tokens[1] == 0, "Second token should be 0 (null byte for !?)");
+
     TEST_PASS("basic ASCII");
+    return true;
+}
+
+bool test_tokenize_world() {
+    // Test 'world' - Python reference: [14615]
+    auto tokens = leaxer_qwen::io::tokenize("world");
+    TEST_ASSERT(tokens.size() == 1, "world should produce 1 token");
+    TEST_ASSERT(tokens[0] == 14615, "world should be token 14615");
+    TEST_PASS("world tokenization");
+    return true;
+}
+
+bool test_tokenize_hello_world() {
+    // Test 'Hello world' - Python reference: [9707, 32, 14615]
+    auto tokens = leaxer_qwen::io::tokenize("Hello world");
+    printf("    'Hello world' tokenized to %zu tokens: ", tokens.size());
+    for (size_t i = 0; i < tokens.size() && i < 10; i++) {
+        printf("%d ", tokens[i]);
+    }
+    printf("\n");
+
+    TEST_ASSERT(tokens.size() == 3, "Hello world should produce 3 tokens");
+    TEST_ASSERT(tokens[0] == 9707, "First token (Hello) should be 9707");
+    TEST_ASSERT(tokens[1] == 32, "Second token (space) should be 32");
+    TEST_ASSERT(tokens[2] == 14615, "Third token (world) should be 14615");
+
+    TEST_PASS("Hello world tokenization");
     return true;
 }
 
@@ -104,6 +141,8 @@ int main() {
     test_tokenize_empty();
     test_tokenize_hello();
     test_tokenize_unicode();
+    test_tokenize_world();
+    test_tokenize_hello_world();
 
     return leaxer_qwen::test::print_summary();
 }

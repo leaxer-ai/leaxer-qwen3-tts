@@ -296,26 +296,68 @@ public:
             return tokens;
         }
 
-        // Simple greedy tokenization: try to match longest tokens first
-        size_t pos = 0;
-        while (pos < text.length()) {
-            // Try to find longest matching token
-            bool found = false;
-            for (size_t len = text.length() - pos; len > 0; len--) {
-                std::string substr = text.substr(pos, len);
-                auto it = token_to_id_.find(substr);
-                if (it != token_to_id_.end()) {
-                    tokens.push_back(it->second);
-                    pos += len;
-                    found = true;
+        // BPE encoding algorithm:
+        // 1. Split text into UTF-8 bytes and convert to token strings
+        std::vector<std::string> word;
+        for (unsigned char c : text) {
+            // Create byte token string (e.g., "a" for 'a', or base vocabulary token)
+            std::string byte_token(1, static_cast<char>(c));
+
+            // Check if byte exists as token in vocab
+            auto it = token_to_id_.find(byte_token);
+            if (it != token_to_id_.end()) {
+                word.push_back(byte_token);
+            } else {
+                // If single byte not in vocab, use as-is
+                word.push_back(byte_token);
+            }
+        }
+
+        // 2. Iteratively apply BPE merges until no more can be applied
+        if (merges_loaded_ && !word.empty()) {
+            while (true) {
+                // Find the pair with the lowest merge rank (highest priority)
+                int best_rank = INT_MAX;
+                int best_pos = -1;
+
+                for (size_t i = 0; i + 1 < word.size(); i++) {
+                    auto pair = std::make_pair(word[i], word[i + 1]);
+                    auto it = merge_rank_.find(pair);
+                    if (it != merge_rank_.end()) {
+                        if (it->second < best_rank) {
+                            best_rank = it->second;
+                            best_pos = static_cast<int>(i);
+                        }
+                    }
+                }
+
+                // If no valid merge found, we're done
+                if (best_pos == -1) {
                     break;
                 }
-            }
 
-            if (!found) {
-                // Character not in vocab, use byte value
-                tokens.push_back(static_cast<int32_t>(static_cast<unsigned char>(text[pos])));
-                pos++;
+                // Merge the best pair
+                std::string merged = word[best_pos] + word[best_pos + 1];
+                word[best_pos] = merged;
+                word.erase(word.begin() + best_pos + 1);
+            }
+        }
+
+        // 3. Convert final tokens to IDs
+        for (const auto& token : word) {
+            auto it = token_to_id_.find(token);
+            if (it != token_to_id_.end()) {
+                tokens.push_back(it->second);
+            } else {
+                // Token not in vocab - try byte-level fallback
+                if (token.length() == 1) {
+                    tokens.push_back(static_cast<int32_t>(static_cast<unsigned char>(token[0])));
+                } else {
+                    // Multi-byte token not in vocab - split into bytes
+                    for (unsigned char c : token) {
+                        tokens.push_back(static_cast<int32_t>(c));
+                    }
+                }
             }
         }
 
