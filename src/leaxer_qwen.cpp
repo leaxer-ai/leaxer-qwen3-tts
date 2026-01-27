@@ -222,6 +222,8 @@ float * tts_generate(
     struct ggml_tensor ** upsample_weights,
     struct ggml_tensor ** upsample_alphas,
     struct ggml_tensor ** upsample_betas,
+    struct ggml_tensor * final_conv_weight,
+    struct ggml_tensor * final_conv_bias,
     float temperature,
     int top_k,
     float top_p,
@@ -549,6 +551,8 @@ float * leaxer_qwen_generate(
         upsample_weights,
         upsample_alphas,
         upsample_betas,
+        ctx->model->vocoder.final_conv_weight,
+        ctx->model->vocoder.final_conv_bias,
         params.temperature,
         params.top_k,
         params.top_p,
@@ -604,6 +608,8 @@ void vocoder_decode(
     const struct ggml_tensor ** upsample_betas,
     int * kernel_sizes,
     int * paddings,
+    const struct ggml_tensor * final_conv_weight,
+    const struct ggml_tensor * final_conv_bias,
     const VocoderTransformerWeights * transformer_weights);
 }
 }
@@ -636,6 +642,8 @@ int leaxer_qwen_write_wav(
 //   upsample_weights: array of 4 upsample layer weights
 //   upsample_alphas: array of 4 alpha parameters
 //   upsample_betas: array of 4 beta parameters
+//   final_conv_weight: final conv weight (optional, can be nullptr)
+//   final_conv_bias: final conv bias (optional, can be nullptr)
 //   temperature: sampling temperature
 //   top_k: top-k sampling parameter
 //   top_p: top-p sampling parameter
@@ -660,6 +668,8 @@ float * tts_generate(
     struct ggml_tensor ** upsample_weights,
     struct ggml_tensor ** upsample_alphas,
     struct ggml_tensor ** upsample_betas,
+    struct ggml_tensor * final_conv_weight,
+    struct ggml_tensor * final_conv_bias,
     float temperature,
     int top_k,
     float top_p,
@@ -825,6 +835,8 @@ float * tts_generate(
         (const struct ggml_tensor **)upsample_betas,
         kernel_sizes,
         paddings,
+        final_conv_weight,
+        final_conv_bias,
         nullptr  // transformer_weights - not loaded yet
     );
 

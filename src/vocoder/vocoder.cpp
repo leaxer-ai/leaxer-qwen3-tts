@@ -61,7 +61,7 @@ namespace vocoder {
 // 2. Causal ConvNet projection
 // 3. Transformer decoder with self-attention
 // 4. 4-stage progressive upsampling
-// 5. Final conv → waveform (output from upsampling)
+// 5. Final conv → waveform
 
 // Output: 24kHz audio
 
@@ -105,10 +105,12 @@ struct ggml_tensor * vocoder_transformer_decode(
 // Input: upsample_weights [4][kernel_size, in_channels, out_channels] - weights for each upsample stage
 // Input: upsample_alphas [4][out_channels] - SnakeBeta alpha parameters
 // Input: upsample_betas [4][out_channels] - SnakeBeta beta parameters
+// Input: final_conv_weight (optional) - final 1D conv to project to waveform
+// Input: final_conv_bias (optional) - final conv bias
 // Input: transformer_weights (optional, can be nullptr) - transformer decoder weights
 // Output: audio samples [seq_len * 480] (24kHz)
 //
-// Pipeline: RVQ decode → (optional causal conv) → (optional transformer) → upsample → audio
+// Pipeline: RVQ decode → (optional causal conv) → (optional transformer) → upsample → final conv → audio
 struct VocoderTransformerWeights {
     struct ggml_tensor * attn_norm_weight;
     struct ggml_tensor * q_weight;
@@ -130,6 +132,8 @@ void vocoder_decode(
     const struct ggml_tensor ** upsample_betas,
     int * kernel_sizes,
     int * paddings,
+    const struct ggml_tensor * final_conv_weight = nullptr,
+    const struct ggml_tensor * final_conv_bias = nullptr,
     const VocoderTransformerWeights * transformer_weights = nullptr
 ) {
     GGML_ASSERT(codes->type == GGML_TYPE_I32);
@@ -220,22 +224,66 @@ void vocoder_decode(
         current = stage_out;
     }
 
-    // Step 4: Output audio (flatten to 1D)
-    // current should be [seq_len * 480, 1, 1] after 4 upsamples
+    // Step 4: Apply final conv to project to single-channel waveform
+    struct ggml_tensor * waveform = current;
+
+    if (final_conv_weight != nullptr) {
+        // Apply final 1D convolution: [seq_len, channels, 1] -> [seq_len, 1, 1]
+        const int64_t seq_len = current->ne[0];
+        const int64_t channels = current->ne[1];
+        const int64_t kernel_size = final_conv_weight->ne[0];
+        const int64_t out_channels = final_conv_weight->ne[2];
+
+        GGML_ASSERT(out_channels == 1);  // Should output single channel
+
+        // Create output tensor for final conv
+        struct ggml_tensor * conv_out = ggml_new_tensor_3d(temp_ctx, GGML_TYPE_F32, seq_len, 1, 1);
+
+        // Create mutable copies for ggml operations
+        struct ggml_tensor * current_copy = ggml_new_tensor_3d(temp_ctx, GGML_TYPE_F32, seq_len, channels, 1);
+        struct ggml_tensor * weight_copy = ggml_new_tensor_3d(temp_ctx, GGML_TYPE_F32, kernel_size, channels, 1);
+        memcpy(current_copy->data, current->data, ggml_nbytes(current));
+        memcpy(weight_copy->data, final_conv_weight->data, ggml_nbytes(final_conv_weight));
+
+        // Apply 1D convolution
+        struct ggml_tensor * conv_result = ggml_conv_1d(temp_ctx, weight_copy, current_copy, 1, 0, 1);
+
+        // Build and compute graph
+        struct ggml_cgraph * graph = ggml_new_graph(temp_ctx);
+        ggml_build_forward_expand(graph, conv_result);
+        ggml_graph_compute_with_ctx(temp_ctx, graph, 1);
+
+        // Copy result and add bias if present
+        memcpy(conv_out->data, conv_result->data, ggml_nbytes(conv_out));
+
+        if (final_conv_bias != nullptr) {
+            float bias = ((const float *)final_conv_bias->data)[0];
+            float * conv_data = (float *)conv_out->data;
+            const int64_t n_samples = ggml_nelements(conv_out);
+            for (int64_t i = 0; i < n_samples; i++) {
+                conv_data[i] += bias;
+            }
+        }
+
+        waveform = conv_out;
+    }
+
+    // Step 5: Output audio (flatten to 1D)
+    // waveform should be [seq_len * 480, 1, 1] after final conv
     // Copy to dst which should be [seq_len * 480]
-    const int64_t total_samples = current->ne[0];
+    const int64_t total_samples = waveform->ne[0];
     GGML_ASSERT(dst->ne[0] == total_samples);
 
-    float * upsampled_data = (float *)current->data;
+    float * waveform_data = (float *)waveform->data;
     float * dst_data = (float *)dst->data;
 
     // If output has single channel, copy directly
-    if (current->ne[1] == 1) {
-        memcpy(dst_data, upsampled_data, ggml_nbytes(dst));
+    if (waveform->ne[1] == 1) {
+        memcpy(dst_data, waveform_data, ggml_nbytes(dst));
     } else {
         // If multiple channels, take first channel only
         for (int64_t i = 0; i < total_samples; i++) {
-            dst_data[i] = upsampled_data[i];
+            dst_data[i] = waveform_data[i];
         }
     }
 
@@ -250,6 +298,7 @@ void vocoder_decode(
 // Wraps vocoder_decode with standard configuration:
 // - 4 upsample stages with rates [8, 5, 4, 3] = 480x total upsampling
 // - Standard kernel sizes and padding
+// - Final conv layer to project to single-channel waveform
 // - Optional transformer decoder (pass nullptr for transformer_weights to skip)
 void vocoder_forward(
     struct ggml_tensor * audio_out,
@@ -257,7 +306,9 @@ void vocoder_forward(
     const struct ggml_tensor * codebooks,
     const struct ggml_tensor ** upsample_weights,
     const struct ggml_tensor ** upsample_alphas,
-    const struct ggml_tensor ** upsample_betas
+    const struct ggml_tensor ** upsample_betas,
+    const struct ggml_tensor * final_conv_weight = nullptr,
+    const struct ggml_tensor * final_conv_bias = nullptr
 ) {
     GGML_ASSERT(codes->type == GGML_TYPE_I32);
     GGML_ASSERT(codebooks->type == GGML_TYPE_F32);
@@ -276,7 +327,6 @@ void vocoder_forward(
     int paddings[NUM_UPSAMPLE_STAGES] = {4, 2, 2, 1};        // Standard padding
 
     // Call the full vocoder_decode implementation
-    // Pass nullptr for transformer_weights to skip transformer stage (not loaded yet)
     vocoder_decode(
         audio_out,
         codes,
@@ -286,6 +336,8 @@ void vocoder_forward(
         upsample_betas,
         kernel_sizes,
         paddings,
+        final_conv_weight,
+        final_conv_bias,
         nullptr  // transformer_weights - skip for now
     );
 }
