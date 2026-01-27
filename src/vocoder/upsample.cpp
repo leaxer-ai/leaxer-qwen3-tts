@@ -14,6 +14,8 @@ constexpr int UPSAMPLE_RATES[] = {8, 5, 4, 3};
 constexpr int NUM_UPSAMPLE_STAGES = 4;
 constexpr int TOTAL_UPSAMPLE = 8 * 5 * 4 * 3;  // 480
 
+} // namespace vocoder
+
 // Forward declaration of SnakeBeta from ops
 namespace ops {
 void snake_beta_inplace(
@@ -22,6 +24,8 @@ void snake_beta_inplace(
     const struct ggml_tensor * alpha_logscale,
     const struct ggml_tensor * beta_logscale);
 }
+
+namespace vocoder {
 
 // Transposed Conv1d for upsampling
 // Input: [seq_len, in_channels, batch] (ggml layout)
@@ -113,7 +117,7 @@ void upsample_stage(
     memcpy(dst->data, conv_out->data, ggml_nbytes(dst));
 
     // Apply SnakeBeta activation in-place
-    ops::snake_beta_inplace(dst, dst, alpha_logscale, beta_logscale);
+    leaxer_qwen::ops::snake_beta_inplace(dst, dst, alpha_logscale, beta_logscale);
 
     // Cleanup
     ggml_free(temp_ctx);
