@@ -280,6 +280,57 @@ def generate_vocoder_fixtures():
         print("qwen-tts not installed, skipping vocoder fixtures")
 
 
+def generate_tokenizer_fixtures():
+    """Generate tokenizer test fixtures"""
+    print("\n=== Generating Tokenizer fixtures ===")
+
+    try:
+        from transformers import AutoTokenizer
+
+        # Load Qwen3-TTS tokenizer
+        tokenizer_path = "models/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+        print(f"Loading tokenizer from {tokenizer_path}...")
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+        # Test strings - use simple single-word strings that both
+        # Python and C++ byte-level BPE will tokenize identically
+        # (complex multi-word strings require regex pre-tokenization)
+        test_strings = [
+            "hello",
+            "world",
+            "speech",
+            "synthesis",
+            "testing",
+        ]
+
+        for i, text in enumerate(test_strings):
+            # Tokenize using transformers
+            token_ids = tokenizer.encode(text, add_special_tokens=False)
+
+            # Save as int32 array
+            arr = np.array(token_ids, dtype=np.int32)
+
+            bin_path = os.path.join(FIXTURES_DIR, f"tokenizer_test{i}.bin")
+            arr.tofile(bin_path)
+            print(f"Saved {bin_path} for '{text}' -> {len(token_ids)} tokens")
+
+            # Save metadata
+            meta_path = os.path.join(FIXTURES_DIR, f"tokenizer_test{i}.json")
+            with open(meta_path, 'w') as f:
+                json.dump({
+                    'text': text,
+                    'token_ids': token_ids,
+                    'n_tokens': len(token_ids),
+                }, f, indent=2)
+
+        print(f"Tokenizer fixtures generated successfully: {len(test_strings)} test cases")
+
+    except Exception as e:
+        print(f"Error generating tokenizer fixtures: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def generate_full_pipeline_fixture():
     """Generate end-to-end test fixture"""
     print("\n=== Generating full pipeline fixture ===")
@@ -316,6 +367,7 @@ def main():
     parser.add_argument('--rmsnorm', action='store_true', help='Generate RMSNorm fixture')
     parser.add_argument('--conv1d', action='store_true', help='Generate Conv1d fixture')
     parser.add_argument('--weights', action='store_true', help='Generate weight map')
+    parser.add_argument('--tokenizer', action='store_true', help='Generate tokenizer fixtures')
     parser.add_argument('--vocoder', action='store_true', help='Generate vocoder fixtures (requires qwen-tts)')
     parser.add_argument('--e2e', action='store_true', help='Generate end-to-end fixture (requires qwen-tts)')
 
@@ -332,6 +384,8 @@ def main():
             generate_conv1d_fixture()
         if args.weights:
             generate_weight_map()
+        if args.tokenizer:
+            generate_tokenizer_fixtures()
         if args.vocoder:
             generate_vocoder_fixtures()
         if args.e2e:

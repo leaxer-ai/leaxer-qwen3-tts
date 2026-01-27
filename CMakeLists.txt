@@ -124,6 +124,11 @@ if(LEAXER_QWEN_BUILD_TESTS)
     target_link_libraries(test_tokenizer PRIVATE leaxer_qwen_lib)
     add_test(NAME tokenizer COMMAND test_tokenizer)
 
+    # Tokenizer real test (against Python fixtures)
+    add_executable(test_tokenizer_real tests/test_tokenizer_real.cpp)
+    target_link_libraries(test_tokenizer_real PRIVATE leaxer_qwen_lib)
+    add_test(NAME tokenizer_real COMMAND test_tokenizer_real)
+
     # GGUF mapping test
     add_executable(test_gguf_mapping tests/test_gguf_mapping.cpp)
     target_link_libraries(test_gguf_mapping PRIVATE leaxer_qwen_lib)
