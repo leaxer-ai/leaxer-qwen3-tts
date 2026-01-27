@@ -33,9 +33,28 @@ struct ggml_tensor * gqa_q_proj(
     return queries;
 }
 
+// K/V projection for GQA
+// Projects input to key/value vectors for KV heads (shared across query head groups)
+// Input: x with shape [hidden_dim, seq_len, batch]
+// Weight: kv_weight with shape [hidden_dim, num_kv_heads * head_dim]
+// Output: keys/values with shape [num_kv_heads * head_dim, seq_len, batch]
+struct ggml_tensor * gqa_kv_proj(
+    struct ggml_context * ctx,
+    struct ggml_tensor * x,
+    struct ggml_tensor * kv_weight) {
+
+    // Matrix multiplication: kv_weight^T @ x
+    // ggml_mul_mat expects: (weight is transposed internally)
+    // kv_weight: [hidden_dim, num_kv_heads * head_dim]
+    // x: [hidden_dim, seq_len, batch]
+    // output: [num_kv_heads * head_dim, seq_len, batch]
+    struct ggml_tensor * kv = ggml_mul_mat(ctx, kv_weight, x);
+
+    return kv;
+}
+
 // TODO: Implement remaining GQA components
 // Key features:
-// - K/V projections (shared across query head groups)
 // - RoPE position embeddings
 // - Attention computation with causal masking
 
