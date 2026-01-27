@@ -623,5 +623,115 @@ bool load_code_predictor_weights(
     return true;
 }
 
+// Load vocoder weights from GGUF file into VocoderWeights struct
+// Returns true on success, false on error
+// Loads decoder weights from Qwen3-TTS-Tokenizer-12Hz model
+// Includes: codebooks, causal conv, 4 upsample stages, final conv
+bool load_vocoder_weights(
+    const char * gguf_path,
+    struct model::VocoderWeights * weights,
+    struct ggml_context * ctx
+) {
+    if (!gguf_path || !weights || !ctx) {
+        fprintf(stderr, "load_vocoder_weights: invalid parameters\n");
+        return false;
+    }
+
+    // Open GGUF file for reading
+    FILE * file = fopen(gguf_path, "rb");
+    if (!file) {
+        fprintf(stderr, "Failed to open GGUF file: %s\n", gguf_path);
+        return false;
+    }
+
+    // Initialize GGUF context with ggml context
+    // This will create all tensors in the context automatically with proper dimensions
+    struct gguf_init_params params = {
+        /*.no_alloc =*/ false,
+        /*.ctx      =*/ &ctx,
+    };
+    struct gguf_context * gguf_ctx = gguf_init_from_file(gguf_path, params);
+    if (!gguf_ctx) {
+        fprintf(stderr, "Failed to initialize GGUF context from: %s\n", gguf_path);
+        fclose(file);
+        return false;
+    }
+
+    size_t data_offset = gguf_get_data_offset(gguf_ctx);
+
+    // Helper macro to load a tensor by name
+    #define LOAD_TENSOR(tensor_ptr, name) \
+        do { \
+            int64_t tid = gguf_find_tensor(gguf_ctx, name); \
+            if (tid < 0) { \
+                fprintf(stderr, "Tensor '%s' not found in GGUF file\n", name); \
+                gguf_free(gguf_ctx); \
+                fclose(file); \
+                return false; \
+            } \
+            tensor_ptr = ggml_get_tensor(ctx, name); \
+            if (!tensor_ptr) { \
+                fprintf(stderr, "Failed to get tensor '%s' from context\n", name); \
+                gguf_free(gguf_ctx); \
+                fclose(file); \
+                return false; \
+            } \
+            size_t t_offset = gguf_get_tensor_offset(gguf_ctx, tid); \
+            size_t t_size = gguf_get_tensor_size(gguf_ctx, tid); \
+            if (fseek(file, data_offset + t_offset, SEEK_SET) != 0) { \
+                fprintf(stderr, "Failed to seek to tensor '%s' data\n", name); \
+                gguf_free(gguf_ctx); \
+                fclose(file); \
+                return false; \
+            } \
+            if (fread(tensor_ptr->data, 1, t_size, file) != t_size) { \
+                fprintf(stderr, "Failed to read tensor '%s' data\n", name); \
+                gguf_free(gguf_ctx); \
+                fclose(file); \
+                return false; \
+            } \
+        } while (0)
+
+    // Load codebooks
+    LOAD_TENSOR(weights->codebooks, "decoder_codebooks");
+
+    // Load causal conv
+    LOAD_TENSOR(weights->causal_conv_weight, "decoder_causal_conv_weight");
+    LOAD_TENSOR(weights->causal_conv_bias, "decoder_causal_conv_bias");
+
+    // Load 4 upsample stages
+    for (int stage = 0; stage < 4; stage++) {
+        char tensor_name[128];
+
+        // Load upsample weight
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_weight", stage);
+        LOAD_TENSOR(weights->upsample_weights[stage], tensor_name);
+
+        // Load upsample bias
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_bias", stage);
+        LOAD_TENSOR(weights->upsample_biases[stage], tensor_name);
+
+        // Load SnakeBeta alpha (log scale)
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_alpha", stage);
+        LOAD_TENSOR(weights->upsample_alphas[stage], tensor_name);
+
+        // Load SnakeBeta beta (log scale)
+        snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_beta", stage);
+        LOAD_TENSOR(weights->upsample_betas[stage], tensor_name);
+    }
+
+    // Load final conv
+    LOAD_TENSOR(weights->final_conv_weight, "decoder_final_conv_weight");
+    LOAD_TENSOR(weights->final_conv_bias, "decoder_final_conv_bias");
+
+    #undef LOAD_TENSOR
+
+    // Cleanup
+    gguf_free(gguf_ctx);
+    fclose(file);
+
+    return true;
+}
+
 } // namespace io
 } // namespace leaxer_qwen
