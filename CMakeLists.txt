@@ -99,10 +99,10 @@ if(LEAXER_QWEN_BUILD_TESTS)
     target_link_libraries(test_placeholder PRIVATE leaxer_qwen_lib)
     add_test(NAME placeholder COMMAND test_placeholder)
 
-    # Component tests (uncomment as implemented)
-    # add_executable(test_snakebeta tests/test_snakebeta.cpp)
-    # target_link_libraries(test_snakebeta PRIVATE leaxer_qwen_lib)
-    # add_test(NAME snakebeta COMMAND test_snakebeta)
+    # Component tests
+    add_executable(test_snakebeta tests/test_snakebeta.cpp)
+    target_link_libraries(test_snakebeta PRIVATE leaxer_qwen_lib)
+    add_test(NAME snakebeta COMMAND test_snakebeta)
 
     # WAV writer test
     add_executable(test_wav tests/test_wav.cpp)

@@ -10,7 +10,7 @@ namespace leaxer_qwen {
 namespace ops {
 
 // Scalar implementation for reference
-inline float snake_beta_scalar(float x, float alpha, float beta) {
+float snake_beta_scalar(float x, float alpha, float beta) {
     float sin_ax = std::sin(alpha * x);
     return x + (1.0f / beta) * sin_ax * sin_ax;
 }
