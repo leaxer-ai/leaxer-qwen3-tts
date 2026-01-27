@@ -121,6 +121,10 @@ def get_vocoder_tensor_mapping() -> dict:
     mapping["decoder.quantizer.rvq_first.output_proj.weight"] = "decoder_rvq_first_output_proj_weight"
     mapping["decoder.quantizer.rvq_rest.output_proj.weight"] = "decoder_rvq_rest_output_proj_weight"
 
+    # Pre-conv layer (512→1024, kernel=3) - comes after quantizer, before pre-transformer
+    mapping["decoder.pre_conv.conv.weight"] = "decoder_pre_conv_weight"
+    mapping["decoder.pre_conv.conv.bias"] = "decoder_pre_conv_bias"
+
     # Pre-transformer input/output projections
     mapping["decoder.pre_transformer.input_proj.weight"] = "decoder_pre_transformer_input_proj_weight"
     mapping["decoder.pre_transformer.input_proj.bias"] = "decoder_pre_transformer_input_proj_bias"
@@ -151,11 +155,31 @@ def get_vocoder_tensor_mapping() -> dict:
         mapping[f"{prefix}.self_attn_layer_scale.scale"] = f"{out_prefix}_attn_scale"
         mapping[f"{prefix}.mlp_layer_scale.scale"] = f"{out_prefix}_ffn_scale"
 
+    # Upsample ConvNeXt blocks (2 stages, after pre-transformer, before decoder)
+    # Each stage: TransConv upsampling + ConvNeXt block
+    for stage in range(2):
+        prefix = f"decoder.upsample.{stage}"
+        out_prefix = f"decoder_upsample_convnext_{stage}"
+        # Transposed convolution for upsampling (stride=2)
+        mapping[f"{prefix}.0.conv.weight"] = f"{out_prefix}_transconv_weight"
+        mapping[f"{prefix}.0.conv.bias"] = f"{out_prefix}_transconv_bias"
+        # ConvNeXt block
+        mapping[f"{prefix}.1.dwconv.conv.weight"] = f"{out_prefix}_dwconv_weight"
+        mapping[f"{prefix}.1.dwconv.conv.bias"] = f"{out_prefix}_dwconv_bias"
+        mapping[f"{prefix}.1.norm.weight"] = f"{out_prefix}_norm_weight"
+        mapping[f"{prefix}.1.norm.bias"] = f"{out_prefix}_norm_bias"
+        mapping[f"{prefix}.1.pwconv1.weight"] = f"{out_prefix}_pwconv1_weight"
+        mapping[f"{prefix}.1.pwconv1.bias"] = f"{out_prefix}_pwconv1_bias"
+        mapping[f"{prefix}.1.pwconv2.weight"] = f"{out_prefix}_pwconv2_weight"
+        mapping[f"{prefix}.1.pwconv2.bias"] = f"{out_prefix}_pwconv2_bias"
+        mapping[f"{prefix}.1.gamma"] = f"{out_prefix}_gamma"
+
     # Causal convolution (projects pre-transformer output to decoder input)
     mapping["decoder.decoder.0.conv.weight"] = "decoder_causal_conv_weight"
     mapping["decoder.decoder.0.conv.bias"] = "decoder_causal_conv_bias"
 
     # Upsample stages 0-3 (decoder.decoder.1-4 → upsample 0-3)
+    # Each stage: block.0=SnakeBeta, block.1=TransposedConv, blocks.2-4=ResBlocks
     for hf_idx in range(1, 5):
         gguf_idx = hf_idx - 1
         # SnakeBeta alpha/beta (activation parameters)
@@ -164,6 +188,21 @@ def get_vocoder_tensor_mapping() -> dict:
         # Transposed convolution weight/bias
         mapping[f"decoder.decoder.{hf_idx}.block.1.conv.weight"] = f"decoder_upsample_{gguf_idx}_weight"
         mapping[f"decoder.decoder.{hf_idx}.block.1.conv.bias"] = f"decoder_upsample_{gguf_idx}_bias"
+
+        # ResBlocks 0-2 (HuggingFace blocks 2-4)
+        for rb_idx, hf_rb_idx in enumerate([2, 3, 4]):
+            rb_prefix = f"decoder.decoder.{hf_idx}.block.{hf_rb_idx}"
+            out_prefix = f"decoder_upsample_{gguf_idx}_rb{rb_idx}"
+            # SnakeBeta activations
+            mapping[f"{rb_prefix}.act1.alpha"] = f"{out_prefix}_act1_alpha"
+            mapping[f"{rb_prefix}.act1.beta"] = f"{out_prefix}_act1_beta"
+            mapping[f"{rb_prefix}.act2.alpha"] = f"{out_prefix}_act2_alpha"
+            mapping[f"{rb_prefix}.act2.beta"] = f"{out_prefix}_act2_beta"
+            # Convolutions
+            mapping[f"{rb_prefix}.conv1.conv.weight"] = f"{out_prefix}_conv1_weight"
+            mapping[f"{rb_prefix}.conv1.conv.bias"] = f"{out_prefix}_conv1_bias"
+            mapping[f"{rb_prefix}.conv2.conv.weight"] = f"{out_prefix}_conv2_weight"
+            mapping[f"{rb_prefix}.conv2.conv.bias"] = f"{out_prefix}_conv2_bias"
 
     # Final SnakeBeta activation (decoder.decoder.5)
     mapping["decoder.decoder.5.alpha"] = "decoder_final_snake_alpha"

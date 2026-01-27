@@ -34,6 +34,22 @@ int write_wav(const char* path, const float* audio, size_t n_samples, int sample
         return -1;
     }
 
+    // Find peak amplitude for normalization
+    float peak = 0.0f;
+    for (size_t i = 0; i < n_samples; i++) {
+        float abs_val = audio[i] < 0 ? -audio[i] : audio[i];
+        if (abs_val > peak) peak = abs_val;
+    }
+
+    // Calculate normalization factor (target peak at 0.95 to leave headroom)
+    float norm_factor = 1.0f;
+    if (peak > 0.0001f) {
+        norm_factor = 0.95f / peak;
+    }
+
+    // Debug: print normalization info
+    printf("  wav: peak=%.4f, norm_factor=%.2f\n", peak, norm_factor);
+
     // Prepare header
     wav_header header;
     std::memcpy(header.riff, "RIFF", 4);
@@ -54,9 +70,9 @@ int write_wav(const char* path, const float* audio, size_t n_samples, int sample
     // Write header
     fwrite(&header, sizeof(wav_header), 1, f);
 
-    // Convert float32 [-1, 1] to int16 and write
+    // Convert float32 to int16 with normalization
     for (size_t i = 0; i < n_samples; i++) {
-        float sample = audio[i];
+        float sample = audio[i] * norm_factor;
         // Clamp to [-1, 1]
         sample = std::max(-1.0f, std::min(1.0f, sample));
         // Convert to int16

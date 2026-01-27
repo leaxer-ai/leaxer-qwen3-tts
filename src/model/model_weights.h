@@ -136,6 +136,68 @@ struct PreTransformerLayer {
     struct ggml_tensor * ffn_scale;              // [hidden_dim]
 };
 
+// ResBlock weights for vocoder
+// Each ResBlock: act1 (SnakeBeta) → conv1 (k=7) → act2 (SnakeBeta) → conv2 (k=1) + residual
+struct VocoderResBlock {
+    // SnakeBeta activation 1
+    struct ggml_tensor * act1_alpha;         // [channels]
+    struct ggml_tensor * act1_beta;          // [channels]
+
+    // Convolution 1 (kernel=7, same channels)
+    struct ggml_tensor * conv1_weight;       // [7, channels, channels] - 1D conv
+    struct ggml_tensor * conv1_bias;         // [channels]
+
+    // SnakeBeta activation 2
+    struct ggml_tensor * act2_alpha;         // [channels]
+    struct ggml_tensor * act2_beta;          // [channels]
+
+    // Convolution 2 (kernel=1, same channels)
+    struct ggml_tensor * conv2_weight;       // [1, channels, channels] - 1D conv (pointwise)
+    struct ggml_tensor * conv2_bias;         // [channels]
+};
+
+// ConvNeXt block weights (used in upsample stages after pre-transformer)
+// Structure: depthwise conv → layernorm → pointwise expansion → pointwise contraction
+struct VocoderConvNeXtBlock {
+    // Transposed convolution for upsampling
+    struct ggml_tensor * transconv_weight;   // [kernel, out_ch, in_ch]
+    struct ggml_tensor * transconv_bias;     // [out_ch]
+
+    // Depthwise 7x1 convolution
+    struct ggml_tensor * dwconv_weight;      // [7, channels, 1] - depthwise
+    struct ggml_tensor * dwconv_bias;        // [channels]
+
+    // Layer normalization
+    struct ggml_tensor * norm_weight;        // [channels]
+    struct ggml_tensor * norm_bias;          // [channels]
+
+    // Pointwise expansion (channels → 4*channels)
+    struct ggml_tensor * pwconv1_weight;     // [4*channels, channels]
+    struct ggml_tensor * pwconv1_bias;       // [4*channels]
+
+    // Pointwise contraction (4*channels → channels)
+    struct ggml_tensor * pwconv2_weight;     // [channels, 4*channels]
+    struct ggml_tensor * pwconv2_bias;       // [channels]
+
+    // Gamma scale parameter
+    struct ggml_tensor * gamma;              // [channels]
+};
+
+// Upsample stage with ResBlocks
+// Structure: SnakeBeta → TransposedConv → 3 ResBlocks
+struct VocoderUpsampleStage {
+    // SnakeBeta activation (before transposed conv)
+    struct ggml_tensor * snake_alpha;        // [in_channels]
+    struct ggml_tensor * snake_beta;         // [in_channels]
+
+    // Transposed convolution for upsampling
+    struct ggml_tensor * conv_weight;        // [kernel, out_channels, in_channels]
+    struct ggml_tensor * conv_bias;          // [out_channels]
+
+    // 3 ResBlocks (after upsampling, operate on out_channels)
+    VocoderResBlock resblocks[3];
+};
+
 // Vocoder weights (decoder from Tokenizer-12Hz model)
 // Converts codec tokens to 24kHz waveform
 // Full architecture:
@@ -143,7 +205,7 @@ struct PreTransformerLayer {
 //   2. Output projections (256→512 each) → concat → 1024-dim
 //   3. Pre-transformer (8 layers, 512-dim internal) with input/output projections
 //   4. Causal conv (1024→1536)
-//   5. Upsample stages (1536→768→384→192→96)
+//   5. Upsample stages (1536→768→384→192→96) with ResBlocks
 //   6. Final snake + conv (96→1)
 struct VocoderWeights {
     // RVQ codebook embeddings
@@ -152,6 +214,10 @@ struct VocoderWeights {
     // RVQ output projections (project each codebook group output before concat)
     struct ggml_tensor * rvq_first_output_proj;  // [512, 256, 1] - 1D conv for first codebook
     struct ggml_tensor * rvq_rest_output_proj;   // [512, 256, 1] - 1D conv for codebooks 1-15
+
+    // Pre-conv layer (512→1024, kernel=3) - comes after RVQ, before pre-transformer
+    struct ggml_tensor * pre_conv_weight;        // [1024, 512, 3] - PyTorch Conv1d format
+    struct ggml_tensor * pre_conv_bias;          // [1024]
 
     // Pre-transformer input/output projections
     struct ggml_tensor * pre_transformer_input_proj_weight;   // [512, 1024] - project concat to transformer dim
@@ -162,12 +228,19 @@ struct VocoderWeights {
     // Pre-transformer layers (8 layers)
     PreTransformerLayer pre_transformer_layers[8];
 
+    // Upsample ConvNeXt blocks (2 stages, after pre-transformer, before decoder)
+    // Each stage: TransConv (stride=2) + ConvNeXt block
+    VocoderConvNeXtBlock upsample_convnext[2];
+
     // Causal convolution (projects pre-transformer output to upsample input)
     struct ggml_tensor * causal_conv_weight;     // [7, 1024, 1536]
     struct ggml_tensor * causal_conv_bias;       // [1536]
 
     // 4-stage progressive upsampling (12Hz → 24kHz)
-    // Each stage: SnakeBeta activation + transposed conv
+    // Each stage: SnakeBeta → TransposedConv → 3 ResBlocks
+    VocoderUpsampleStage upsample_stages[4];
+
+    // Legacy arrays for backward compatibility during transition
     struct ggml_tensor * upsample_alphas[4];     // SnakeBeta alpha (log scale)
     struct ggml_tensor * upsample_betas[4];      // SnakeBeta beta (log scale)
     struct ggml_tensor * upsample_weights[4];    // Transposed conv weights

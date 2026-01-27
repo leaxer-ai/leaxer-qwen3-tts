@@ -862,9 +862,12 @@ float * tts_generate(
     fflush(stdout);
 
     // Step 5: Run vocoder to generate audio
-    // Output audio length: seq_len * 480 (24kHz / 12Hz * 240 samples per token)
-    // Actually, 480 = 8 * 5 * 4 * 3 = product of upsample rates
-    constexpr int UPSAMPLE_FACTOR = 480;
+    // Total upsample factor:
+    //   ConvNeXt stages: 2 * 2 = 4x
+    //   Decoder stages: 8 * 5 * 4 * 3 = 480x
+    //   Total: 4 * 480 = 1920x
+    // Output audio length: seq_len * 1920 at 24kHz
+    constexpr int UPSAMPLE_FACTOR = 1920;  // 4 (ConvNeXt) * 480 (decoder)
     size_t audio_len = seq_len * UPSAMPLE_FACTOR;
 
     float * audio = (float *)malloc(audio_len * sizeof(float));

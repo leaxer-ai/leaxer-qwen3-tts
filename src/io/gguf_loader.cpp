@@ -841,6 +841,20 @@ bool load_vocoder_weights(
     LOAD_TENSOR(weights->rvq_first_output_proj, "decoder_rvq_first_output_proj_weight");
     LOAD_TENSOR(weights->rvq_rest_output_proj, "decoder_rvq_rest_output_proj_weight");
 
+    // Load pre_conv layer (512→1024, kernel=3) - optional, may not exist in older GGUF files
+    {
+        int64_t tid = gguf_find_tensor(gguf_ctx, "decoder_pre_conv_weight");
+        if (tid >= 0) {
+            LOAD_TENSOR(weights->pre_conv_weight, "decoder_pre_conv_weight");
+            LOAD_TENSOR(weights->pre_conv_bias, "decoder_pre_conv_bias");
+            printf("  vocoder: loaded pre_conv layer\n");
+        } else {
+            weights->pre_conv_weight = nullptr;
+            weights->pre_conv_bias = nullptr;
+            printf("  vocoder: pre_conv layer not found in GGUF (will skip)\n");
+        }
+    }
+
     // Load pre-transformer input/output projections
     LOAD_TENSOR(weights->pre_transformer_input_proj_weight, "decoder_pre_transformer_input_proj_weight");
     LOAD_TENSOR(weights->pre_transformer_input_proj_bias, "decoder_pre_transformer_input_proj_bias");
@@ -890,6 +904,56 @@ bool load_vocoder_weights(
         LOAD_TENSOR(layer_weights->ffn_scale, tensor_name);
     }
 
+    // Load upsample ConvNeXt blocks (2 stages) - optional, may not exist in older GGUF files
+    {
+        char tensor_name[128];
+        int64_t tid = gguf_find_tensor(gguf_ctx, "decoder_upsample_convnext_0_transconv_weight");
+        if (tid >= 0) {
+            for (int stage = 0; stage < 2; stage++) {
+                model::VocoderConvNeXtBlock * block = &weights->upsample_convnext[stage];
+
+                // Transposed conv
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_transconv_weight", stage);
+                LOAD_TENSOR(block->transconv_weight, tensor_name);
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_transconv_bias", stage);
+                LOAD_TENSOR(block->transconv_bias, tensor_name);
+
+                // Depthwise conv
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_dwconv_weight", stage);
+                LOAD_TENSOR(block->dwconv_weight, tensor_name);
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_dwconv_bias", stage);
+                LOAD_TENSOR(block->dwconv_bias, tensor_name);
+
+                // Layer norm
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_norm_weight", stage);
+                LOAD_TENSOR(block->norm_weight, tensor_name);
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_norm_bias", stage);
+                LOAD_TENSOR(block->norm_bias, tensor_name);
+
+                // Pointwise convs
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_pwconv1_weight", stage);
+                LOAD_TENSOR(block->pwconv1_weight, tensor_name);
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_pwconv1_bias", stage);
+                LOAD_TENSOR(block->pwconv1_bias, tensor_name);
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_pwconv2_weight", stage);
+                LOAD_TENSOR(block->pwconv2_weight, tensor_name);
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_pwconv2_bias", stage);
+                LOAD_TENSOR(block->pwconv2_bias, tensor_name);
+
+                // Gamma
+                snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_convnext_%d_gamma", stage);
+                LOAD_TENSOR(block->gamma, tensor_name);
+            }
+            printf("  vocoder: loaded upsample ConvNeXt blocks (2 stages)\n");
+        } else {
+            // Initialize to null
+            for (int stage = 0; stage < 2; stage++) {
+                memset(&weights->upsample_convnext[stage], 0, sizeof(model::VocoderConvNeXtBlock));
+            }
+            printf("  vocoder: upsample ConvNeXt blocks not found in GGUF (will skip)\n");
+        }
+    }
+
     // Load causal conv
     LOAD_TENSOR(weights->causal_conv_weight, "decoder_causal_conv_weight");
     LOAD_TENSOR(weights->causal_conv_bias, "decoder_causal_conv_bias");
@@ -901,16 +965,53 @@ bool load_vocoder_weights(
         // Load SnakeBeta alpha/beta (before upsample conv)
         snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_alpha", stage);
         LOAD_TENSOR(weights->upsample_alphas[stage], tensor_name);
+        weights->upsample_stages[stage].snake_alpha = weights->upsample_alphas[stage];
 
         snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_beta", stage);
         LOAD_TENSOR(weights->upsample_betas[stage], tensor_name);
+        weights->upsample_stages[stage].snake_beta = weights->upsample_betas[stage];
 
         // Load upsample conv weight/bias
         snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_weight", stage);
         LOAD_TENSOR(weights->upsample_weights[stage], tensor_name);
+        weights->upsample_stages[stage].conv_weight = weights->upsample_weights[stage];
 
         snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_bias", stage);
         LOAD_TENSOR(weights->upsample_biases[stage], tensor_name);
+        weights->upsample_stages[stage].conv_bias = weights->upsample_biases[stage];
+
+        // Load 3 ResBlocks per stage
+        for (int rb = 0; rb < 3; rb++) {
+            model::VocoderResBlock * resblock = &weights->upsample_stages[stage].resblocks[rb];
+
+            // SnakeBeta act1
+            snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_rb%d_act1_alpha", stage, rb);
+            LOAD_TENSOR(resblock->act1_alpha, tensor_name);
+
+            snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_rb%d_act1_beta", stage, rb);
+            LOAD_TENSOR(resblock->act1_beta, tensor_name);
+
+            // Conv1 (kernel=7)
+            snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_rb%d_conv1_weight", stage, rb);
+            LOAD_TENSOR(resblock->conv1_weight, tensor_name);
+
+            snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_rb%d_conv1_bias", stage, rb);
+            LOAD_TENSOR(resblock->conv1_bias, tensor_name);
+
+            // SnakeBeta act2
+            snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_rb%d_act2_alpha", stage, rb);
+            LOAD_TENSOR(resblock->act2_alpha, tensor_name);
+
+            snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_rb%d_act2_beta", stage, rb);
+            LOAD_TENSOR(resblock->act2_beta, tensor_name);
+
+            // Conv2 (kernel=1)
+            snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_rb%d_conv2_weight", stage, rb);
+            LOAD_TENSOR(resblock->conv2_weight, tensor_name);
+
+            snprintf(tensor_name, sizeof(tensor_name), "decoder_upsample_%d_rb%d_conv2_bias", stage, rb);
+            LOAD_TENSOR(resblock->conv2_bias, tensor_name);
+        }
     }
 
     // Load final SnakeBeta
