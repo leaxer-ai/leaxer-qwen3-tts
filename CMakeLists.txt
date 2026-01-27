@@ -124,6 +124,11 @@ if(LEAXER_QWEN_BUILD_TESTS)
     target_link_libraries(test_tokenizer PRIVATE leaxer_qwen_lib)
     add_test(NAME tokenizer COMMAND test_tokenizer)
 
+    # GGUF mapping test
+    add_executable(test_gguf_mapping tests/test_gguf_mapping.cpp)
+    target_link_libraries(test_gguf_mapping PRIVATE leaxer_qwen_lib)
+    add_test(NAME gguf_mapping COMMAND test_gguf_mapping)
+
     # End-to-end test
     add_executable(test_e2e tests/test_e2e.cpp)
     target_link_libraries(test_e2e PRIVATE leaxer_qwen_lib)

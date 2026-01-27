@@ -6,10 +6,186 @@
 #include "ggml.h"
 #include "gguf.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace leaxer_qwen {
 namespace io {
+
+// Map GGUF tensor name to model struct field path
+// Handles shortened names from conversion:
+// - "tk_l_N_*" -> talker layer N fields
+// - "talker_cp_l_N_*" -> code predictor layer N fields
+// - "talker_model_*" -> talker top-level fields
+// Returns empty string if name is not recognized
+static const char * map_gguf_tensor_name(const char * gguf_name) {
+    if (!gguf_name) {
+        return "";
+    }
+
+    // Talker model layers: tk_l_N_*
+    if (strncmp(gguf_name, "tk_l_", 5) == 0) {
+        // Extract layer number
+        int layer_num = atoi(gguf_name + 5);
+        const char * rest = strchr(gguf_name + 5, '_');
+        if (!rest) return "";
+        rest++; // Skip the underscore after layer number
+
+        // Map to talker.layers[N].field
+        static char path[256];
+        snprintf(path, sizeof(path), "talker.layers[%d].", layer_num);
+
+        // Map field names
+        if (strncmp(rest, "in_ln_weight", 12) == 0) {
+            strcat(path, "in_ln_weight");
+        } else if (strncmp(rest, "attn_q_proj_weight", 18) == 0) {
+            strcat(path, "attn_q_proj_weight");
+        } else if (strncmp(rest, "attn_k_proj_weight", 18) == 0) {
+            strcat(path, "attn_k_proj_weight");
+        } else if (strncmp(rest, "attn_v_proj_weight", 18) == 0) {
+            strcat(path, "attn_v_proj_weight");
+        } else if (strncmp(rest, "attn_o_proj_weight", 18) == 0) {
+            strcat(path, "attn_o_proj_weight");
+        } else if (strncmp(rest, "post_ln_weight", 14) == 0) {
+            strcat(path, "post_ln_weight");
+        } else if (strncmp(rest, "ffn_gate_proj_weight", 20) == 0) {
+            strcat(path, "ffn_gate_proj_weight");
+        } else if (strncmp(rest, "ffn_up_proj_weight", 18) == 0) {
+            strcat(path, "ffn_up_proj_weight");
+        } else if (strncmp(rest, "ffn_down_proj_weight", 20) == 0) {
+            strcat(path, "ffn_down_proj_weight");
+        } else {
+            return "";
+        }
+
+        return path;
+    }
+
+    // Code predictor layers: talker_cp_l_N_*
+    if (strncmp(gguf_name, "talker_cp_l_", 12) == 0) {
+        // Extract layer number
+        int layer_num = atoi(gguf_name + 12);
+        const char * rest = strchr(gguf_name + 12, '_');
+        if (!rest) return "";
+        rest++; // Skip the underscore after layer number
+
+        // Map to code_predictor.layers[N].field
+        static char path[256];
+        snprintf(path, sizeof(path), "code_predictor.layers[%d].", layer_num);
+
+        // Map field names (same as talker layer fields)
+        if (strncmp(rest, "in_ln_weight", 12) == 0) {
+            strcat(path, "in_ln_weight");
+        } else if (strncmp(rest, "attn_q_proj_weight", 18) == 0) {
+            strcat(path, "attn_q_proj_weight");
+        } else if (strncmp(rest, "attn_k_proj_weight", 18) == 0) {
+            strcat(path, "attn_k_proj_weight");
+        } else if (strncmp(rest, "attn_v_proj_weight", 18) == 0) {
+            strcat(path, "attn_v_proj_weight");
+        } else if (strncmp(rest, "attn_o_proj_weight", 18) == 0) {
+            strcat(path, "attn_o_proj_weight");
+        } else if (strncmp(rest, "post_ln_weight", 14) == 0) {
+            strcat(path, "post_ln_weight");
+        } else if (strncmp(rest, "ffn_gate_proj_weight", 20) == 0) {
+            strcat(path, "ffn_gate_proj_weight");
+        } else if (strncmp(rest, "ffn_up_proj_weight", 18) == 0) {
+            strcat(path, "ffn_up_proj_weight");
+        } else if (strncmp(rest, "ffn_down_proj_weight", 20) == 0) {
+            strcat(path, "ffn_down_proj_weight");
+        } else {
+            return "";
+        }
+
+        return path;
+    }
+
+    // Talker top-level fields: talker_model_*
+    if (strncmp(gguf_name, "talker_model_", 13) == 0) {
+        const char * rest = gguf_name + 13;
+        static char path[256];
+        strcpy(path, "talker.");
+
+        if (strncmp(rest, "emb_weight", 10) == 0 ||
+            strncmp(rest, "embed_tokens_weight", 19) == 0) {
+            strcat(path, "emb_weight");
+        } else if (strcmp(rest, "norm_weight") == 0) {
+            strcat(path, "norm_weight");
+        } else if (strcmp(rest, "lm_head_weight") == 0) {
+            strcat(path, "lm_head_weight");
+        } else if (strcmp(rest, "codec_embedding_weight") == 0) {
+            // This is actually for code_predictor
+            return "code_predictor.codec_embedding_weight";
+        } else {
+            return "";
+        }
+
+        return path;
+    }
+
+    // Code predictor top-level fields
+    if (strncmp(gguf_name, "talker_code_predictor_", 22) == 0) {
+        const char * rest = gguf_name + 22;
+        static char path[256];
+        strcpy(path, "code_predictor.");
+
+        if (strcmp(rest, "norm_weight") == 0) {
+            strcat(path, "norm_weight");
+        } else if (strncmp(rest, "output_heads_", 13) == 0) {
+            // output_heads_N_weight
+            int head_num = atoi(rest + 13);
+            snprintf(path + 15, 256 - 15, "output_heads[%d]", head_num);
+        } else {
+            return "";
+        }
+
+        return path;
+    }
+
+    // Vocoder fields: decoder_* (from Tokenizer-12Hz model)
+    if (strncmp(gguf_name, "decoder_", 8) == 0) {
+        const char * rest = gguf_name + 8;
+        static char path[256];
+        strcpy(path, "vocoder.");
+
+        // Parse vocoder component names
+        if (strncmp(rest, "codebooks", 9) == 0) {
+            strcat(path, "codebooks");
+        } else if (strncmp(rest, "causal_conv_weight", 18) == 0) {
+            strcat(path, "causal_conv_weight");
+        } else if (strncmp(rest, "causal_conv_bias", 16) == 0) {
+            strcat(path, "causal_conv_bias");
+        } else if (strncmp(rest, "upsample_", 9) == 0) {
+            // upsample_N_weight, upsample_N_bias, upsample_N_alpha, upsample_N_beta
+            int stage = atoi(rest + 9);
+            const char * type = strchr(rest + 9, '_');
+            if (!type) return "";
+            type++; // Skip underscore
+
+            if (strcmp(type, "weight") == 0) {
+                snprintf(path + 8, 256 - 8, "upsample_weights[%d]", stage);
+            } else if (strcmp(type, "bias") == 0) {
+                snprintf(path + 8, 256 - 8, "upsample_biases[%d]", stage);
+            } else if (strcmp(type, "alpha") == 0) {
+                snprintf(path + 8, 256 - 8, "upsample_alphas[%d]", stage);
+            } else if (strcmp(type, "beta") == 0) {
+                snprintf(path + 8, 256 - 8, "upsample_betas[%d]", stage);
+            } else {
+                return "";
+            }
+        } else if (strcmp(rest, "final_conv_weight") == 0) {
+            strcat(path, "final_conv_weight");
+        } else if (strcmp(rest, "final_conv_bias") == 0) {
+            strcat(path, "final_conv_bias");
+        } else {
+            return "";
+        }
+
+        return path;
+    }
+
+    // Unrecognized tensor name
+    return "";
+}
 
 // Load a single tensor from GGUF file by name
 // Returns nullptr if tensor not found or on error
@@ -179,6 +355,11 @@ bool gguf_load_model(
     fclose(file);
 
     return true;
+}
+
+// Test wrapper to expose mapping function
+const char * test_map_gguf_tensor_name(const char * gguf_name) {
+    return map_gguf_tensor_name(gguf_name);
 }
 
 } // namespace io
