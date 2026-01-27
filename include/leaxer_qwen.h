@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "ggml.h"
 
 #ifdef __cplusplus
 extern "C" {
