@@ -85,12 +85,39 @@ struct ggml_tensor * transformer_block(
     // RMSNorm → Attention → Add
     struct ggml_tensor * normed = ops::rms_norm(ctx, x, attn_norm_weight, 1e-6f);
 
-    // Compute attention (simplified - full GQA implementation would be more complex)
-    // For now, we'll implement a basic attention path
+    // Compute attention (GQA - Grouped Query Attention)
     // Q, K, V projections
     struct ggml_tensor * Q = gqa_q_proj(ctx, normed, q_weight);
     struct ggml_tensor * K = gqa_kv_proj(ctx, normed, k_weight);
     struct ggml_tensor * V = gqa_kv_proj(ctx, normed, v_weight);
+
+    // Reshape Q, K, V to separate head dimension
+    // Q: [num_heads * head_dim, seq_len] -> [head_dim, seq_len, num_heads]
+    // K, V: [num_kv_heads * head_dim, seq_len] -> [head_dim, seq_len, num_kv_heads]
+    int seq_len = Q->ne[1];
+    int q_dim = Q->ne[0];  // num_heads * head_dim
+    int kv_dim = K->ne[0];  // num_kv_heads * head_dim
+
+    // For GQA: assume 16 query heads, 8 KV heads, head_dim = 64
+    // These should be parameters, but hardcode for now to match model
+    const int num_heads = 16;
+    const int num_kv_heads = 16;  // Set to num_heads for now (non-GQA)
+    const int head_dim = q_dim / num_heads;
+
+    // First convert to 4D to separate heads, then permute
+    // Q: [num_heads * head_dim, seq_len] = [head_dim, num_heads, seq_len, 1]  (view)
+    // Then permute to [head_dim, seq_len, num_heads, 1]
+    Q = ggml_reshape_4d(ctx, Q, head_dim, num_heads, seq_len, 1);
+    Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));  // [head_dim, seq_len, num_heads, 1]
+    Q = ggml_reshape_3d(ctx, Q, head_dim, seq_len, num_heads);  // Remove singleton dim
+
+    K = ggml_reshape_4d(ctx, K, head_dim, num_kv_heads, seq_len, 1);
+    K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+    K = ggml_reshape_3d(ctx, K, head_dim, seq_len, num_kv_heads);
+
+    V = ggml_reshape_4d(ctx, V, head_dim, num_kv_heads, seq_len, 1);
+    V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
+    V = ggml_reshape_3d(ctx, V, head_dim, seq_len, num_kv_heads);
 
     // Compute attention scores
     struct ggml_tensor * scores = attention_scores(ctx, Q, K);

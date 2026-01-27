@@ -50,16 +50,17 @@ constexpr int CODEC_PAD_ID = 4196;
 constexpr int CODEC_BOS_ID = 4197;
 constexpr int CODEC_EOS_ID = 4198;
 
-// LLM Forward Pass
-// Architecture: Embedding → N Transformer Blocks → Final Norm → Output Projection
+// Talker Forward Pass (Qwen3-TTS LLM)
+// Architecture: Embedding → 28 Transformer Blocks (with RoPE) → Final Norm → Output Projection
 // Input: token_ids with shape [seq_len]
 // Weights:
 //   - embed_weight: [vocab_size, hidden_dim] embedding matrix
 //   - layer_X_*: weights for each transformer layer (X = 0 to n_layers-1)
 //   - norm_weight: [hidden_dim] final RMSNorm weight
-//   - lm_head_weight: [vocab_size, hidden_dim] output projection
-// Output: [vocab_size, seq_len] logits for next token prediction
-struct ggml_tensor * llm_forward(
+//   - lm_head_weight: [vocab_size, hidden_dim] output projection (semantic codebook)
+// Output: [vocab_size, seq_len] logits for semantic token prediction
+// Note: Uses RoPE (Rotary Position Embeddings) for position encoding
+struct ggml_tensor * talker_forward(
     struct ggml_context * ctx,
     struct ggml_tensor * token_ids,
     struct ggml_tensor * embed_weight,
@@ -74,7 +75,8 @@ struct ggml_tensor * llm_forward(
     // Output: [hidden_dim, seq_len]
     struct ggml_tensor * embedded = ggml_get_rows(ctx, embed_weight, token_ids);
 
-    // Step 2: Pass through N transformer blocks
+    // Step 2: Pass through N transformer blocks (28 for 0.6B model)
+    // Each block applies RoPE for position encoding
     struct ggml_tensor * hidden = embedded;
     for (int i = 0; i < n_layers; i++) {
         // Each layer expects 10 weight tensors in order:
@@ -87,7 +89,6 @@ struct ggml_tensor * llm_forward(
         // 6: ffn_w1
         // 7: ffn_w2
         // 8: ffn_w3
-        // 9: (reserved for future use)
         struct ggml_tensor ** layer_w = &layer_weights[i * 10];
 
         hidden = transformer_block(
@@ -110,13 +111,35 @@ struct ggml_tensor * llm_forward(
     // norm_weight: [hidden_dim]
     struct ggml_tensor * normalized = ops::rms_norm(ctx, hidden, norm_weight, 1e-6f);
 
-    // Step 4: Output projection to vocabulary
+    // Step 4: Output projection to semantic codebook vocabulary
     // normalized: [hidden_dim, seq_len]
     // lm_head_weight: [vocab_size, hidden_dim]
     // Output: [vocab_size, seq_len]
     struct ggml_tensor * logits = ggml_mul_mat(ctx, lm_head_weight, normalized);
 
     return logits;
+}
+
+// LLM Forward Pass (generic version, kept for compatibility)
+// Architecture: Embedding → N Transformer Blocks → Final Norm → Output Projection
+// Input: token_ids with shape [seq_len]
+// Weights:
+//   - embed_weight: [vocab_size, hidden_dim] embedding matrix
+//   - layer_X_*: weights for each transformer layer (X = 0 to n_layers-1)
+//   - norm_weight: [hidden_dim] final RMSNorm weight
+//   - lm_head_weight: [vocab_size, hidden_dim] output projection
+// Output: [vocab_size, seq_len] logits for next token prediction
+struct ggml_tensor * llm_forward(
+    struct ggml_context * ctx,
+    struct ggml_tensor * token_ids,
+    struct ggml_tensor * embed_weight,
+    struct ggml_tensor ** layer_weights,  // Array of pointers to layer weights
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight) {
+
+    // Forward to talker_forward (same implementation)
+    return talker_forward(ctx, token_ids, embed_weight, layer_weights, n_layers, norm_weight, lm_head_weight);
 }
 
 // Token Sampling

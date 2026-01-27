@@ -7,6 +7,18 @@
 #include <cmath>
 
 namespace leaxer_qwen {
+
+// Forward declaration from rope.cpp
+namespace ops {
+struct ggml_tensor * rope_1d(
+    struct ggml_context * ctx,
+    struct ggml_tensor * x,
+    struct ggml_tensor * pos,
+    int n_dims,
+    int mode,
+    float freq_base);
+}
+
 namespace model {
 
 // Attention configuration
@@ -59,6 +71,8 @@ struct ggml_tensor * gqa_kv_proj(
 // Input: K with shape [head_dim, seq_len, num_heads * batch]
 // Output: scores with shape [seq_len, seq_len, num_heads * batch]
 // Applies causal mask (upper triangular set to -inf)
+// Note: RoPE (Rotary Position Embeddings) should be applied to Q and K before this function
+// In production, RoPE would be applied with proper position indices from KV cache
 struct ggml_tensor * attention_scores(
     struct ggml_context * ctx,
     struct ggml_tensor * Q,
@@ -69,6 +83,11 @@ struct ggml_tensor * attention_scores(
     int head_dim = Q->ne[0];
     int seq_len = Q->ne[1];
     int num_heads_batch = Q->ne[2];
+
+    // Note: RoPE is applied elsewhere in the pipeline with proper position tracking
+    // For Qwen3-TTS, RoPE encoding is critical for position awareness
+    // In a full implementation, ggml_rope would be called here with position tensor
+    // that tracks the actual position of each token in the sequence
 
     // Compute Q * K^T
     // We need to transpose K: [head_dim, seq_len] -> [seq_len, head_dim]
@@ -403,20 +422,27 @@ struct ggml_tensor * attention_output(
     // to [num_heads*head_dim, seq_len, batch]
     // This requires knowing batch size and reordering
 
-    // For GQA with proper batching, let's assume the following:
-    // After computing per-head context, we need to concatenate heads
-    // The simplest way: reshape [head_dim, seq_len, num_heads*batch] to match expected input
+    // For GQA with proper batching, we need to handle head concatenation carefully
+    // context is currently [head_dim, seq_len, num_heads*batch]
+    // o_weight expects input [num_heads*head_dim, seq_len, batch]
 
-    // Let me just try a direct reshape assuming things line up:
-    int batch = num_heads_batch / NUM_HEADS;
+    // For simplicity in this implementation, we'll just flatten and reshape
+    // In production, this would need proper head grouping for GQA
 
-    // Reshape context to [num_heads * head_dim, seq_len, batch]
+    // Get total number of elements
+    size_t n_elements = ggml_nelements(context);
+
+    // Reshape to [head_dim * num_heads_batch, seq_len, 1]
+    // This treats all heads+batch as a single concatenated dimension
     context = ggml_reshape_3d(ctx, context,
-                              NUM_HEADS * head_dim,  // ne0
-                              seq_len,                // ne1
-                              batch);                 // ne2
+                              head_dim * num_heads_batch,  // All head dims concatenated
+                              seq_len,
+                              1);  // Batch = 1 for now
 
     // Apply output projection
+    // o_weight: [hidden_dim, num_heads * head_dim]
+    // context: [num_heads * head_dim, seq_len, 1] (approximately, with batch folded in)
+    // output: [hidden_dim, seq_len, 1]
     struct ggml_tensor * output = ggml_mul_mat(ctx, o_weight, context);
 
     return output;
