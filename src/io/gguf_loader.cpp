@@ -1,5 +1,7 @@
 // GGUF Model Loader
 // Loads Qwen3-TTS weights from GGUF format
+// Supports both float (F32, F16) and quantized (Q4_0, Q8_0) tensor types
+// Quantized tensors are loaded as-is and automatically dequantized during ggml operations
 
 #include "ggml.h"
 #include "gguf.h"
