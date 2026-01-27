@@ -128,6 +128,11 @@ if(LEAXER_QWEN_BUILD_TESTS)
     add_executable(test_e2e tests/test_e2e.cpp)
     target_link_libraries(test_e2e PRIVATE leaxer_qwen_lib)
     add_test(NAME e2e COMMAND test_e2e)
+
+    # Real model test
+    add_executable(test_real_model tests/test_real_model.cpp)
+    target_link_libraries(test_real_model PRIVATE leaxer_qwen_lib)
+    add_test(NAME real_model COMMAND test_real_model)
 endif()
 
 # Install
