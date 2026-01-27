@@ -304,6 +304,82 @@ struct leaxer_qwen_model * leaxer_qwen_load_model(
     }
 
     printf("Model loaded successfully\n");
+
+    // Print model info
+    printf("\nModel Info:\n");
+    printf("  Architecture: Qwen3-TTS 0.6B\n");
+    printf("  Talker layers: 28 (hidden_dim=1024, intermediate=3072)\n");
+    printf("  Code predictor layers: 5\n");
+    printf("  Attention: GQA (16 query heads, 8 KV heads)\n");
+    printf("  Codebooks: 16 (2048 codes each)\n");
+    printf("  Vocab size: ~152k tokens\n");
+
+    // Count parameters
+    size_t total_params = 0;
+
+    // Talker parameters
+    size_t talker_params = 0;
+    if (model->talker.emb_weight) {
+        talker_params += ggml_nelements(model->talker.emb_weight);
+    }
+    for (int i = 0; i < 28; i++) {
+        if (model->talker.layers[i].in_ln_weight) talker_params += ggml_nelements(model->talker.layers[i].in_ln_weight);
+        if (model->talker.layers[i].attn_q_proj_weight) talker_params += ggml_nelements(model->talker.layers[i].attn_q_proj_weight);
+        if (model->talker.layers[i].attn_k_proj_weight) talker_params += ggml_nelements(model->talker.layers[i].attn_k_proj_weight);
+        if (model->talker.layers[i].attn_v_proj_weight) talker_params += ggml_nelements(model->talker.layers[i].attn_v_proj_weight);
+        if (model->talker.layers[i].attn_o_proj_weight) talker_params += ggml_nelements(model->talker.layers[i].attn_o_proj_weight);
+        if (model->talker.layers[i].post_ln_weight) talker_params += ggml_nelements(model->talker.layers[i].post_ln_weight);
+        if (model->talker.layers[i].ffn_gate_proj_weight) talker_params += ggml_nelements(model->talker.layers[i].ffn_gate_proj_weight);
+        if (model->talker.layers[i].ffn_up_proj_weight) talker_params += ggml_nelements(model->talker.layers[i].ffn_up_proj_weight);
+        if (model->talker.layers[i].ffn_down_proj_weight) talker_params += ggml_nelements(model->talker.layers[i].ffn_down_proj_weight);
+    }
+    if (model->talker.norm_weight) talker_params += ggml_nelements(model->talker.norm_weight);
+    if (model->talker.lm_head_weight) talker_params += ggml_nelements(model->talker.lm_head_weight);
+
+    // Code predictor parameters
+    size_t code_pred_params = 0;
+    if (model->code_predictor.codec_embedding_weight) {
+        code_pred_params += ggml_nelements(model->code_predictor.codec_embedding_weight);
+    }
+    for (int i = 0; i < 5; i++) {
+        if (model->code_predictor.layers[i].in_ln_weight) code_pred_params += ggml_nelements(model->code_predictor.layers[i].in_ln_weight);
+        if (model->code_predictor.layers[i].attn_q_proj_weight) code_pred_params += ggml_nelements(model->code_predictor.layers[i].attn_q_proj_weight);
+        if (model->code_predictor.layers[i].attn_k_proj_weight) code_pred_params += ggml_nelements(model->code_predictor.layers[i].attn_k_proj_weight);
+        if (model->code_predictor.layers[i].attn_v_proj_weight) code_pred_params += ggml_nelements(model->code_predictor.layers[i].attn_v_proj_weight);
+        if (model->code_predictor.layers[i].attn_o_proj_weight) code_pred_params += ggml_nelements(model->code_predictor.layers[i].attn_o_proj_weight);
+        if (model->code_predictor.layers[i].post_ln_weight) code_pred_params += ggml_nelements(model->code_predictor.layers[i].post_ln_weight);
+        if (model->code_predictor.layers[i].ffn_gate_proj_weight) code_pred_params += ggml_nelements(model->code_predictor.layers[i].ffn_gate_proj_weight);
+        if (model->code_predictor.layers[i].ffn_up_proj_weight) code_pred_params += ggml_nelements(model->code_predictor.layers[i].ffn_up_proj_weight);
+        if (model->code_predictor.layers[i].ffn_down_proj_weight) code_pred_params += ggml_nelements(model->code_predictor.layers[i].ffn_down_proj_weight);
+    }
+    if (model->code_predictor.norm_weight) code_pred_params += ggml_nelements(model->code_predictor.norm_weight);
+    for (int i = 0; i < 16; i++) {
+        if (model->code_predictor.output_heads[i]) code_pred_params += ggml_nelements(model->code_predictor.output_heads[i]);
+    }
+
+    // Vocoder parameters
+    size_t vocoder_params = 0;
+    if (model->vocoder.codebooks) vocoder_params += ggml_nelements(model->vocoder.codebooks);
+    if (model->vocoder.causal_conv_weight) vocoder_params += ggml_nelements(model->vocoder.causal_conv_weight);
+    if (model->vocoder.causal_conv_bias) vocoder_params += ggml_nelements(model->vocoder.causal_conv_bias);
+    for (int i = 0; i < 4; i++) {
+        if (model->vocoder.upsample_weights[i]) vocoder_params += ggml_nelements(model->vocoder.upsample_weights[i]);
+        if (model->vocoder.upsample_biases[i]) vocoder_params += ggml_nelements(model->vocoder.upsample_biases[i]);
+        if (model->vocoder.upsample_alphas[i]) vocoder_params += ggml_nelements(model->vocoder.upsample_alphas[i]);
+        if (model->vocoder.upsample_betas[i]) vocoder_params += ggml_nelements(model->vocoder.upsample_betas[i]);
+    }
+    if (model->vocoder.final_conv_weight) vocoder_params += ggml_nelements(model->vocoder.final_conv_weight);
+    if (model->vocoder.final_conv_bias) vocoder_params += ggml_nelements(model->vocoder.final_conv_bias);
+
+    total_params = talker_params + code_pred_params + vocoder_params;
+
+    printf("  Parameters:\n");
+    printf("    Talker: %.1fM\n", talker_params / 1e6);
+    printf("    Code Predictor: %.1fM\n", code_pred_params / 1e6);
+    printf("    Vocoder: %.1fM\n", vocoder_params / 1e6);
+    printf("    Total: %.1fM\n", total_params / 1e6);
+    printf("\n");
+
     return model;
 }
 
