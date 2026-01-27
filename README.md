@@ -1,10 +1,6 @@
-# leaxer-qwen
+# 🚧 Work in Progress 🚧
 
 Pure C++ implementation of Qwen3-TTS using ggml tensor library.
-
-## Status
-
-🚧 **Work in Progress**
 
 ## Goal
 
