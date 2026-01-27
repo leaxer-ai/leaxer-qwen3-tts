@@ -2,6 +2,7 @@
 // Integrates: Tokenizer → LLM → Code Predictor → Vocoder
 
 #include "ggml.h"
+#include "ggml-cpu.h"
 #include "common.h"
 #include <cmath>
 #include <cstdint>
@@ -232,6 +233,106 @@ int sample_token(
     int result = candidates[n_candidates - 1].id;
     delete[] candidates;
     return result;
+}
+
+// Autoregressive Token Generation
+// Generates tokens autoregressively until EOS token is encountered or max_tokens is reached
+// Parameters:
+//   - ctx: ggml context for tensor operations
+//   - prompt_tokens: initial prompt token IDs [prompt_len]
+//   - prompt_len: length of prompt
+//   - embed_weight: embedding weights [vocab_size, hidden_dim]
+//   - layer_weights: array of pointers to transformer layer weights
+//   - n_layers: number of transformer layers
+//   - norm_weight: final normalization weights [hidden_dim]
+//   - lm_head_weight: output projection weights [vocab_size, hidden_dim]
+//   - max_tokens: maximum number of tokens to generate
+//   - temperature: sampling temperature
+//   - top_k: top-k sampling parameter
+//   - top_p: top-p (nucleus) sampling parameter
+//   - eos_token_id: token ID that signals end of sequence
+//   - rng_state: random number generator state
+//   - output_tokens: buffer to store generated tokens (caller must allocate)
+// Returns: number of tokens generated (including prompt)
+int generate_tokens(
+    struct ggml_context * ctx,
+    const int * prompt_tokens,
+    int prompt_len,
+    struct ggml_tensor * embed_weight,
+    struct ggml_tensor ** layer_weights,
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight,
+    int max_tokens,
+    float temperature,
+    int top_k,
+    float top_p,
+    int eos_token_id,
+    uint64_t * rng_state,
+    int * output_tokens) {
+
+    // Initialize with prompt tokens
+    for (int i = 0; i < prompt_len; i++) {
+        output_tokens[i] = prompt_tokens[i];
+    }
+
+    int current_len = prompt_len;
+
+    // Autoregressive generation loop
+    while (current_len < max_tokens) {
+        // Create tensor for current sequence
+        struct ggml_tensor * token_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, current_len);
+        int32_t * token_data = (int32_t *)token_ids->data;
+        for (int i = 0; i < current_len; i++) {
+            token_data[i] = output_tokens[i];
+        }
+
+        // Forward pass through LLM
+        struct ggml_tensor * logits = llm_forward(
+            ctx,
+            token_ids,
+            embed_weight,
+            layer_weights,
+            n_layers,
+            norm_weight,
+            lm_head_weight
+        );
+
+        // Build and execute compute graph
+        struct ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, logits);
+        ggml_graph_compute_with_ctx(ctx, graph, 1);  // Single-threaded for now
+
+        // Get logits for last position
+        // logits shape: [vocab_size, seq_len]
+        int vocab_size = logits->ne[0];
+        int seq_len = logits->ne[1];
+        float * logits_data = (float *)logits->data;
+
+        // Extract logits for last token position
+        float * last_logits = logits_data + vocab_size * (seq_len - 1);
+
+        // Sample next token
+        int next_token = sample_token(
+            last_logits,
+            vocab_size,
+            temperature,
+            top_k,
+            top_p,
+            rng_state
+        );
+
+        // Append to sequence
+        output_tokens[current_len] = next_token;
+        current_len++;
+
+        // Check for EOS
+        if (next_token == eos_token_id) {
+            break;
+        }
+    }
+
+    return current_len;
 }
 
 // TODO: Implement full TTS model
