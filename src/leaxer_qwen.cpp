@@ -712,7 +712,7 @@ float * tts_generate(
     constexpr int IM_START_TOKEN_ID = 151644;
     constexpr int IM_END_TOKEN_ID = 151645;
     constexpr int TTS_BOS_TOKEN_ID = 151672;
-    constexpr int CODEC_EOS_ID = 4198;
+    constexpr int CODEC_EOS_ID = 4198;  // Note: may be out of range
 
     // Step 1: Tokenize input text
     std::string text_str(text);
@@ -723,6 +723,14 @@ float * tts_generate(
         *n_samples_out = 0;
         return nullptr;
     }
+
+    // Estimate reasonable token count: ~20 tokens per text token
+    // This prevents infinite generation when EOS is out of LM head range
+    int estimated_max_tokens = (int)text_tokens.size() * 20 + 50;
+    if (estimated_max_tokens > 512) estimated_max_tokens = 512;  // Cap for memory
+    printf("Text tokens: %zu, estimated max codec tokens: %d\n",
+           text_tokens.size(), estimated_max_tokens);
+    fflush(stdout);
 
     // Step 2: Build prompt with special tokens
     // Format: <|im_start|> text_tokens <|im_end|> <TTS_BOS>
@@ -735,8 +743,9 @@ float * tts_generate(
     prompt.push_back(TTS_BOS_TOKEN_ID);
 
     // Step 3: Generate codec tokens using LLM
-    constexpr int MAX_TOKENS = 2048;
-    int * generated_tokens = (int *)malloc(MAX_TOKENS * sizeof(int));
+    // Use estimated max to avoid generating forever when EOS is out of range
+    int max_gen_tokens = (int)prompt.size() + estimated_max_tokens;
+    int * generated_tokens = (int *)malloc(max_gen_tokens * sizeof(int));
     if (!generated_tokens) {
         fprintf(stderr, "Error: failed to allocate token buffer\n");
         *n_samples_out = 0;
@@ -761,7 +770,7 @@ float * tts_generate(
         n_layers,
         norm_weight,
         lm_head_weight,
-        MAX_TOKENS,
+        max_gen_tokens,
         temperature,
         top_k,
         top_p,
@@ -803,13 +812,23 @@ float * tts_generate(
     int32_t * semantic_data = (int32_t *)semantic_codes->data;
 
     // Convert token IDs to codebook indices (0-2047)
-    constexpr int CODEC_VOCAB_START = 151936;
+    // Codec tokens could be:
+    // 1. 0-2047 directly (if model outputs in codec space)
+    // 2. 151936-153983 (if model uses extended vocab)
+    // We detect based on the token range
+    constexpr int CODEC_VOCAB_START_HIGH = 151936;
+    constexpr int CODEC_VOCAB_SIZE = 2048;
+
+    // Check if tokens are in high range or low range
+    bool tokens_are_high_range = (generated_tokens[codec_start] >= CODEC_VOCAB_START_HIGH);
+    int codec_offset = tokens_are_high_range ? CODEC_VOCAB_START_HIGH : 0;
+
     for (int t = 0; t < seq_len; t++) {
         int token = generated_tokens[codec_start + t];
-        int code = token - CODEC_VOCAB_START;
+        int code = token - codec_offset;
         // Clamp to valid range
         if (code < 0) code = 0;
-        if (code >= 2048) code = 2047;
+        if (code >= CODEC_VOCAB_SIZE) code = CODEC_VOCAB_SIZE - 1;
         semantic_data[t] = code;
     }
 
