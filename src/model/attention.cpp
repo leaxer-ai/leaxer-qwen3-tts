@@ -4,6 +4,7 @@
 
 #include "ggml.h"
 #include "common.h"
+#include <cmath>
 
 namespace leaxer_qwen {
 namespace model {
@@ -53,10 +54,53 @@ struct ggml_tensor * gqa_kv_proj(
     return kv;
 }
 
+// Compute attention scores: Q*K^T / sqrt(d) with causal mask
+// Input: Q with shape [head_dim, seq_len, num_heads * batch]
+// Input: K with shape [head_dim, seq_len, num_heads * batch]
+// Output: scores with shape [seq_len, seq_len, num_heads * batch]
+// Applies causal mask (upper triangular set to -inf)
+struct ggml_tensor * attention_scores(
+    struct ggml_context * ctx,
+    struct ggml_tensor * Q,
+    struct ggml_tensor * K) {
+
+    // Get dimensions
+    // Q, K: [head_dim, seq_len, num_heads * batch]
+    int head_dim = Q->ne[0];
+    int seq_len = Q->ne[1];
+    int num_heads_batch = Q->ne[2];
+
+    // Compute Q * K^T
+    // We need to transpose K: [head_dim, seq_len] -> [seq_len, head_dim]
+    // Then multiply: [head_dim, seq_len] @ [seq_len, head_dim]^T = [seq_len, seq_len]
+    // ggml_mul_mat(ctx, a, b) computes a^T @ b, so we need: K^T @ Q
+    // which gives us [seq_len, head_dim] @ [head_dim, seq_len] = [seq_len, seq_len]
+
+    // For each head separately, we need:
+    // Q: [head_dim, seq_len] @ K^T: [seq_len, head_dim] = [seq_len, seq_len]
+    // In ggml terms: ggml_mul_mat(K, Q) where K and Q are per-head slices
+
+    // Actually, ggml_mul_mat with 3d tensors will batch across the 3rd dimension
+    // So we can just do: ggml_mul_mat(ctx, K, Q)
+    // This computes K^T @ Q for each slice along dim 2
+    // Result: [seq_len, seq_len, num_heads * batch]
+    struct ggml_tensor * scores = ggml_mul_mat(ctx, K, Q);
+
+    // Scale by 1/sqrt(head_dim)
+    float scale = 1.0f / sqrtf((float)head_dim);
+    scores = ggml_scale(ctx, scores, scale);
+
+    // Apply causal mask
+    // Set upper triangular part (j > i) to -inf
+    scores = ggml_diag_mask_inf(ctx, scores, 0);
+
+    return scores;
+}
+
 // TODO: Implement remaining GQA components
 // Key features:
 // - RoPE position embeddings
-// - Attention computation with causal masking
+// - Full attention with softmax and value projection
 
 } // namespace model
 } // namespace leaxer_qwen
