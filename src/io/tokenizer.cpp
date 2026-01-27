@@ -5,20 +5,219 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <cctype>
 
 namespace leaxer_qwen {
 namespace io {
 
-// Simple BPE tokenizer implementation
-// For now, implements basic byte-level encoding
-// TODO: Load actual vocab and merges from GGUF file
+// Helper to parse hex digit
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+// Minimal JSON parser for vocab.json
+// Parses flat dictionary: {"token": id, ...}
+static bool parse_vocab_json(const std::string& path,
+                             std::unordered_map<std::string, int32_t>& token_to_id,
+                             std::unordered_map<int32_t, std::string>& id_to_token) {
+    FILE* file = fopen(path.c_str(), "rb");
+    if (!file) {
+        fprintf(stderr, "Failed to open vocab file: %s\n", path.c_str());
+        return false;
+    }
+
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    if (file_size <= 0 || file_size > 100 * 1024 * 1024) {
+        fprintf(stderr, "Invalid file size: %ld\n", file_size);
+        fclose(file);
+        return false;
+    }
+
+    // Read file into buffer
+    char* buffer = (char*)malloc(file_size + 1);
+    if (!buffer) {
+        fprintf(stderr, "Failed to allocate memory\n");
+        fclose(file);
+        return false;
+    }
+
+    size_t read_size = fread(buffer, 1, file_size, file);
+    fclose(file);
+
+    if (read_size != (size_t)file_size) {
+        fprintf(stderr, "Failed to read file\n");
+        free(buffer);
+        return false;
+    }
+
+    buffer[file_size] = '\0';
+    const char* content = buffer;
+    size_t pos = 0;
+    size_t len = file_size;
+
+    // Skip opening '{'
+    while (pos < len && std::isspace(static_cast<unsigned char>(content[pos]))) pos++;
+    if (pos >= len || content[pos] != '{') {
+        fprintf(stderr, "Expected '{' at start of JSON\n");
+        free(buffer);
+        return false;
+    }
+    pos++;
+
+    int count = 0;
+    while (pos < len) {
+        // Skip whitespace
+        while (pos < len && std::isspace(static_cast<unsigned char>(content[pos]))) pos++;
+        if (pos >= len) break;
+
+        // Check for closing '}'
+        if (content[pos] == '}') break;
+
+        // Skip comma
+        if (content[pos] == ',') {
+            pos++;
+            continue;
+        }
+
+        // Parse key (token string)
+        if (content[pos] != '"') {
+            fprintf(stderr, "Expected '\"' at position %zu\n", pos);
+            free(buffer);
+            return false;
+        }
+        pos++; // Skip opening quote
+
+        std::string token;
+        while (pos < len && content[pos] != '"') {
+            if (content[pos] == '\\') {
+                pos++;
+                if (pos >= len) {
+                    fprintf(stderr, "Unexpected end of file in escape sequence\n");
+                    free(buffer);
+                    return false;
+                }
+
+                // Handle escape sequences
+                switch (content[pos]) {
+                    case 'n': token += '\n'; break;
+                    case 't': token += '\t'; break;
+                    case 'r': token += '\r'; break;
+                    case '\\': token += '\\'; break;
+                    case '"': token += '"'; break;
+                    case 'u': {
+                        // Unicode escape: \uXXXX
+                        if (pos + 4 >= len) {
+                            fprintf(stderr, "Invalid unicode escape\n");
+                            free(buffer);
+                            return false;
+                        }
+                        pos++;
+
+                        // Parse hex digits manually
+                        int codepoint = 0;
+                        for (int i = 0; i < 4; i++) {
+                            int digit = hex_digit(content[pos + i]);
+                            if (digit < 0) {
+                                fprintf(stderr, "Invalid hex digit in unicode escape\n");
+                                free(buffer);
+                                return false;
+                            }
+                            codepoint = (codepoint << 4) | digit;
+                        }
+
+                        // Simple UTF-8 encoding (BMP only)
+                        if (codepoint < 0x80) {
+                            token += static_cast<char>(codepoint);
+                        } else if (codepoint < 0x800) {
+                            token += static_cast<char>(0xC0 | (codepoint >> 6));
+                            token += static_cast<char>(0x80 | (codepoint & 0x3F));
+                        } else {
+                            token += static_cast<char>(0xE0 | (codepoint >> 12));
+                            token += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+                            token += static_cast<char>(0x80 | (codepoint & 0x3F));
+                        }
+                        pos += 3; // Will be incremented by 1 at end of loop
+                        break;
+                    }
+                    default:
+                        token += content[pos];
+                        break;
+                }
+            } else {
+                token += content[pos];
+            }
+            pos++;
+        }
+        if (pos >= len) {
+            fprintf(stderr, "Unexpected end of file in token string\n");
+            free(buffer);
+            return false;
+        }
+        pos++; // Skip closing quote
+
+        // Skip whitespace and colon
+        while (pos < len && std::isspace(static_cast<unsigned char>(content[pos]))) pos++;
+        if (pos >= len || content[pos] != ':') {
+            fprintf(stderr, "Expected ':' after token\n");
+            free(buffer);
+            return false;
+        }
+        pos++;
+        while (pos < len && std::isspace(static_cast<unsigned char>(content[pos]))) pos++;
+
+        // Parse value (token ID)
+        if (pos >= len || !std::isdigit(static_cast<unsigned char>(content[pos]))) {
+            fprintf(stderr, "Expected digit for token ID\n");
+            free(buffer);
+            return false;
+        }
+
+        int32_t id = 0;
+        while (pos < len && std::isdigit(static_cast<unsigned char>(content[pos]))) {
+            id = id * 10 + (content[pos] - '0');
+            pos++;
+        }
+
+        // Store in maps
+        token_to_id[token] = id;
+        id_to_token[id] = token;
+        count++;
+
+        // Progress indicator for large files
+        if (count % 10000 == 0) {
+            fprintf(stderr, "Loaded %d tokens...\n", count);
+        }
+    }
+
+    free(buffer);
+    fprintf(stderr, "Successfully loaded %d tokens\n", count);
+    return !token_to_id.empty();
+}
 
 class BPETokenizer {
 public:
-    BPETokenizer() {
-        // Initialize with basic byte-to-token mapping
-        // In a real implementation, this would load from vocab file
-        init_byte_mapping();
+    BPETokenizer() : vocab_loaded_(false) {}
+
+    bool load_vocab(const std::string& vocab_path) {
+        token_to_id_.clear();
+        id_to_token_.clear();
+
+        if (!parse_vocab_json(vocab_path, token_to_id_, id_to_token_)) {
+            return false;
+        }
+
+        vocab_loaded_ = true;
+        return true;
     }
 
     std::vector<int32_t> tokenize(const std::string& text) {
@@ -28,34 +227,91 @@ public:
             return tokens;
         }
 
-        // Simple byte-level tokenization
-        // Each byte maps to a token ID
-        for (unsigned char c : text) {
-            int32_t token_id = byte_to_token[c];
-            tokens.push_back(token_id);
+        if (!vocab_loaded_) {
+            // Fallback: byte-level tokenization
+            for (unsigned char c : text) {
+                tokens.push_back(static_cast<int32_t>(c));
+            }
+            return tokens;
+        }
+
+        // Simple greedy tokenization: try to match longest tokens first
+        size_t pos = 0;
+        while (pos < text.length()) {
+            // Try to find longest matching token
+            bool found = false;
+            for (size_t len = text.length() - pos; len > 0; len--) {
+                std::string substr = text.substr(pos, len);
+                auto it = token_to_id_.find(substr);
+                if (it != token_to_id_.end()) {
+                    tokens.push_back(it->second);
+                    pos += len;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                // Character not in vocab, use byte value
+                tokens.push_back(static_cast<int32_t>(static_cast<unsigned char>(text[pos])));
+                pos++;
+            }
         }
 
         return tokens;
     }
 
-private:
-    void init_byte_mapping() {
-        // Map each byte (0-255) to a token ID
-        // Using simple identity mapping for now
-        for (int i = 0; i < 256; i++) {
-            byte_to_token[i] = i;
+    std::string token_to_string(int32_t id) const {
+        auto it = id_to_token_.find(id);
+        if (it != id_to_token_.end()) {
+            return it->second;
         }
+        return "";
     }
 
-    std::unordered_map<int, int32_t> byte_to_token;
+    int32_t string_to_token(const std::string& token) const {
+        auto it = token_to_id_.find(token);
+        if (it != token_to_id_.end()) {
+            return it->second;
+        }
+        return -1; // Not found
+    }
+
+    bool is_loaded() const {
+        return vocab_loaded_;
+    }
+
+    size_t vocab_size() const {
+        return token_to_id_.size();
+    }
+
+private:
+    bool vocab_loaded_;
+    std::unordered_map<std::string, int32_t> token_to_id_;
+    std::unordered_map<int32_t, std::string> id_to_token_;
 };
 
-// Global tokenizer instance
-static BPETokenizer g_tokenizer;
+// Global tokenizer instance - use function-local static for lazy initialization
+static BPETokenizer& get_tokenizer() {
+    static BPETokenizer tokenizer;
+    return tokenizer;
+}
 
-// Public tokenize function
+// Public API functions
+bool load_vocab(const std::string& vocab_path) {
+    return get_tokenizer().load_vocab(vocab_path);
+}
+
 std::vector<int32_t> tokenize(const std::string& text) {
-    return g_tokenizer.tokenize(text);
+    return get_tokenizer().tokenize(text);
+}
+
+std::string token_to_string(int32_t id) {
+    return get_tokenizer().token_to_string(id);
+}
+
+int32_t string_to_token(const std::string& token) {
+    return get_tokenizer().string_to_token(token);
 }
 
 } // namespace io
