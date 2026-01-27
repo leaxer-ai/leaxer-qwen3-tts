@@ -92,12 +92,6 @@ if(LEAXER_QWEN_BUILD_TESTS)
     enable_testing()
 
     # Test utilities (header-only for now)
-    # Tests will be added as components are implemented
-
-    # Placeholder test
-    add_executable(test_placeholder tests/test_placeholder.cpp)
-    target_link_libraries(test_placeholder PRIVATE leaxer_qwen_lib)
-    add_test(NAME placeholder COMMAND test_placeholder)
 
     # Component tests
     add_executable(test_snakebeta tests/test_snakebeta.cpp)
