@@ -491,5 +491,137 @@ bool load_talker_weights(
     return true;
 }
 
+// Load code predictor weights from GGUF file into CodePredictorWeights struct
+// Returns true on success, false on error
+// Loads codec embeddings, all 5 transformer layers, norm, and 16 output heads
+bool load_code_predictor_weights(
+    const char * gguf_path,
+    struct model::CodePredictorWeights * weights,
+    struct ggml_context * ctx
+) {
+    if (!gguf_path || !weights || !ctx) {
+        fprintf(stderr, "load_code_predictor_weights: invalid parameters\n");
+        return false;
+    }
+
+    // Open GGUF file for reading
+    FILE * file = fopen(gguf_path, "rb");
+    if (!file) {
+        fprintf(stderr, "Failed to open GGUF file: %s\n", gguf_path);
+        return false;
+    }
+
+    // Initialize GGUF context with ggml context
+    // This will create all tensors in the context automatically with proper dimensions
+    struct gguf_init_params params = {
+        /*.no_alloc =*/ false,
+        /*.ctx      =*/ &ctx,
+    };
+    struct gguf_context * gguf_ctx = gguf_init_from_file(gguf_path, params);
+    if (!gguf_ctx) {
+        fprintf(stderr, "Failed to initialize GGUF context from: %s\n", gguf_path);
+        fclose(file);
+        return false;
+    }
+
+    size_t data_offset = gguf_get_data_offset(gguf_ctx);
+
+    // Helper macro to load a tensor by name
+    #define LOAD_TENSOR(tensor_ptr, name) \
+        do { \
+            int64_t tid = gguf_find_tensor(gguf_ctx, name); \
+            if (tid < 0) { \
+                fprintf(stderr, "Tensor '%s' not found in GGUF file\n", name); \
+                gguf_free(gguf_ctx); \
+                fclose(file); \
+                return false; \
+            } \
+            tensor_ptr = ggml_get_tensor(ctx, name); \
+            if (!tensor_ptr) { \
+                fprintf(stderr, "Failed to get tensor '%s' from context\n", name); \
+                gguf_free(gguf_ctx); \
+                fclose(file); \
+                return false; \
+            } \
+            size_t t_offset = gguf_get_tensor_offset(gguf_ctx, tid); \
+            size_t t_size = gguf_get_tensor_size(gguf_ctx, tid); \
+            if (fseek(file, data_offset + t_offset, SEEK_SET) != 0) { \
+                fprintf(stderr, "Failed to seek to tensor '%s' data\n", name); \
+                gguf_free(gguf_ctx); \
+                fclose(file); \
+                return false; \
+            } \
+            if (fread(tensor_ptr->data, 1, t_size, file) != t_size) { \
+                fprintf(stderr, "Failed to read tensor '%s' data\n", name); \
+                gguf_free(gguf_ctx); \
+                fclose(file); \
+                return false; \
+            } \
+        } while (0)
+
+    // Load codec embedding weight
+    LOAD_TENSOR(weights->codec_embedding_weight, "talker_model_codec_embedding_weight");
+
+    // Load all 5 layers
+    for (int layer = 0; layer < 5; layer++) {
+        char tensor_name[128];
+        model::CodePredictorLayer * layer_weights = &weights->layers[layer];
+
+        // Load input layer norm
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_in_ln_weight", layer);
+        LOAD_TENSOR(layer_weights->in_ln_weight, tensor_name);
+
+        // Load attention Q projection
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_attn_q_proj_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_q_proj_weight, tensor_name);
+
+        // Load attention K projection
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_attn_k_proj_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_k_proj_weight, tensor_name);
+
+        // Load attention V projection
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_attn_v_proj_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_v_proj_weight, tensor_name);
+
+        // Load attention O projection
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_attn_o_proj_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_o_proj_weight, tensor_name);
+
+        // Load post attention layer norm
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_post_ln_weight", layer);
+        LOAD_TENSOR(layer_weights->post_ln_weight, tensor_name);
+
+        // Load FFN gate projection
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_ffn_gate_proj_weight", layer);
+        LOAD_TENSOR(layer_weights->ffn_gate_proj_weight, tensor_name);
+
+        // Load FFN up projection
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_ffn_up_proj_weight", layer);
+        LOAD_TENSOR(layer_weights->ffn_up_proj_weight, tensor_name);
+
+        // Load FFN down projection
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_ffn_down_proj_weight", layer);
+        LOAD_TENSOR(layer_weights->ffn_down_proj_weight, tensor_name);
+    }
+
+    // Load final norm weight
+    LOAD_TENSOR(weights->norm_weight, "talker_code_predictor_norm_weight");
+
+    // Load all 16 output heads
+    for (int head = 0; head < 16; head++) {
+        char tensor_name[128];
+        snprintf(tensor_name, sizeof(tensor_name), "talker_code_predictor_output_heads_%d_weight", head);
+        LOAD_TENSOR(weights->output_heads[head], tensor_name);
+    }
+
+    #undef LOAD_TENSOR
+
+    // Cleanup
+    gguf_free(gguf_ctx);
+    fclose(file);
+
+    return true;
+}
+
 } // namespace io
 } // namespace leaxer_qwen
