@@ -63,6 +63,7 @@ int main(int argc, char ** argv) {
         }
         if (arg == "-v" || arg == "--version") {
             printf("leaxer-qwen version %s\n", leaxer_qwen_version());
+            leaxer_qwen_print_system_info();
             return 0;
         }
         if (arg == "--list-speakers") {
@@ -179,8 +180,68 @@ const char * leaxer_qwen_version(void) {
 }
 
 void leaxer_qwen_print_system_info(void) {
-    printf("leaxer-qwen system info:\n");
+    printf("\nSystem Information:\n");
     printf("  Version: %s\n", LEAXER_QWEN_VERSION);
+
+    // Backend detection
+    printf("  Backend: ");
+#if defined(GGML_USE_CUDA)
+    printf("CUDA");
+#elif defined(GGML_USE_METAL)
+    printf("Metal");
+#elif defined(GGML_USE_VULKAN)
+    printf("Vulkan");
+#elif defined(GGML_USE_SYCL)
+    printf("SYCL");
+#elif defined(GGML_USE_OPENCL)
+    printf("OpenCL");
+#else
+    printf("CPU");
+#endif
+    printf("\n");
+
+    // SIMD support detection
+    printf("  SIMD Support:");
+#if defined(__AVX512F__)
+    printf(" AVX512");
+#endif
+#if defined(__AVX2__)
+    printf(" AVX2");
+#endif
+#if defined(__AVX__)
+    printf(" AVX");
+#endif
+#if defined(__SSE4_2__)
+    printf(" SSE4.2");
+#endif
+#if defined(__SSE4_1__)
+    printf(" SSE4.1");
+#endif
+#if defined(__SSSE3__)
+    printf(" SSSE3");
+#endif
+#if defined(__SSE3__)
+    printf(" SSE3");
+#endif
+#if defined(__SSE2__)
+    printf(" SSE2");
+#endif
+#if defined(__ARM_NEON)
+    printf(" NEON");
+#endif
+#if defined(__ARM_FEATURE_FMA)
+    printf(" FMA");
+#endif
+#if defined(__wasm_simd128__)
+    printf(" WASM-SIMD");
+#endif
+#if !defined(__AVX512F__) && !defined(__AVX2__) && !defined(__AVX__) && \
+    !defined(__SSE4_2__) && !defined(__SSE4_1__) && !defined(__SSSE3__) && \
+    !defined(__SSE3__) && !defined(__SSE2__) && !defined(__ARM_NEON) && \
+    !defined(__wasm_simd128__)
+    printf(" None");
+#endif
+    printf("\n");
 }
 
 struct leaxer_qwen_model_params leaxer_qwen_model_default_params(void) {
