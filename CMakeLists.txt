@@ -148,6 +148,11 @@ if(LEAXER_QWEN_BUILD_TESTS)
     add_executable(test_speaker_embedding tests/test_speaker_embedding.cpp)
     target_link_libraries(test_speaker_embedding PRIVATE leaxer_qwen_lib)
     add_test(NAME speaker_embedding COMMAND test_speaker_embedding)
+
+    # Audio quality verification test
+    add_executable(test_audio_quality tests/test_audio_quality.cpp)
+    target_link_libraries(test_audio_quality PRIVATE leaxer_qwen_lib)
+    add_test(NAME audio_quality COMMAND test_audio_quality)
 endif()
 
 # Install
