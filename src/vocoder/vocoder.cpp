@@ -2,6 +2,7 @@
 // Converts discrete codec tokens to audio waveform
 
 #include "ggml.h"
+#include "ggml-cpu.h"
 #include "common.h"
 #include <cstring>
 #include <cstdint>
@@ -129,6 +130,53 @@ void vocoder_decode(
 
     // Cleanup
     free_ggml_context(temp_ctx);
+}
+
+// Simplified vocoder_forward interface
+// Input: codes [16, seq_len] - RVQ codes (int32 tensor)
+// Output: audio samples [seq_len * 480] (float32 tensor)
+//
+// This is a simplified interface that wraps vocoder_decode.
+// It assumes standard vocoder configuration:
+// - 4 upsample stages with rates [8, 5, 4, 3] = 480x total upsampling
+// - Standard kernel sizes and padding
+//
+// The function allocates intermediate tensors and calls vocoder_decode.
+void vocoder_forward(
+    struct ggml_tensor * audio_out,
+    const struct ggml_tensor * codes,
+    const struct ggml_tensor * codebooks,
+    const struct ggml_tensor ** upsample_weights,
+    const struct ggml_tensor ** upsample_alphas,
+    const struct ggml_tensor ** upsample_betas
+) {
+    GGML_ASSERT(codes->type == GGML_TYPE_I32);
+    GGML_ASSERT(codebooks->type == GGML_TYPE_F32);
+    GGML_ASSERT(audio_out->type == GGML_TYPE_F32);
+
+    const int64_t seq_len = codes->ne[0];
+    const int64_t num_codebooks = codes->ne[1];
+    const int64_t expected_audio_len = seq_len * 480;  // 12Hz → 24kHz upsampling
+
+    GGML_ASSERT(num_codebooks == 16);
+    GGML_ASSERT(audio_out->ne[0] == expected_audio_len);
+
+    // Standard vocoder configuration from Qwen3-TTS
+    // Upsample rates: 8x → 5x → 4x → 3x = 480x total
+    int kernel_sizes[NUM_UPSAMPLE_STAGES] = {16, 10, 8, 6};  // Standard kernel sizes
+    int paddings[NUM_UPSAMPLE_STAGES] = {4, 2, 2, 1};        // Standard padding
+
+    // Call the full vocoder_decode implementation
+    vocoder_decode(
+        audio_out,
+        codes,
+        codebooks,
+        upsample_weights,
+        upsample_alphas,
+        upsample_betas,
+        kernel_sizes,
+        paddings
+    );
 }
 
 } // namespace vocoder
