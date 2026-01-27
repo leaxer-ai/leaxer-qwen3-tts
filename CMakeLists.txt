@@ -113,6 +113,11 @@ if(LEAXER_QWEN_BUILD_TESTS)
     add_executable(test_rmsnorm tests/test_rmsnorm.cpp)
     target_link_libraries(test_rmsnorm PRIVATE leaxer_qwen_lib)
     add_test(NAME rmsnorm COMMAND test_rmsnorm)
+
+    # Conv1d test
+    add_executable(test_conv1d tests/test_conv1d.cpp)
+    target_link_libraries(test_conv1d PRIVATE leaxer_qwen_lib)
+    add_test(NAME conv1d COMMAND test_conv1d)
 endif()
 
 # Install
