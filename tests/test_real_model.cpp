@@ -88,6 +88,7 @@ bool test_load_gguf_model() {
     }
 
     // Verify we can find some expected tensors and check for quantization
+    // Qwen3-TTS has: speaker_encoder, talker (with code_predictor), codec_embedding
     bool found_embed = false;
     bool found_norm = false;
     bool found_layer = false;
@@ -97,13 +98,18 @@ bool test_load_gguf_model() {
         const char* name = gguf_get_tensor_name(gguf_ctx, i);
         enum ggml_type type = gguf_get_tensor_type(gguf_ctx, i);
 
-        if (strstr(name, "token_embd") || strstr(name, "embed")) {
+        // Look for embedding weights (Qwen3-TTS has codec_embedding)
+        if (strstr(name, "token_embd") || strstr(name, "embed") || strstr(name, "emb")) {
             found_embed = true;
         }
-        if (strstr(name, "output_norm") || strstr(name, "norm")) {
+        // Look for normalization weights
+        if (strstr(name, "output_norm") || strstr(name, "norm") || strstr(name, "_ln")) {
             found_norm = true;
         }
-        if (strstr(name, "blk.0") || strstr(name, "layer.0") || strstr(name, "layers.0")) {
+        // Look for layer weights (Qwen3-TTS uses tk_l_ for talker layers, cp_l_ for code predictor)
+        if (strstr(name, "blk.0") || strstr(name, "layer") ||
+            strstr(name, "tk_l_0") || strstr(name, "cp_l_0") ||
+            strstr(name, "talker") || strstr(name, "speaker")) {
             found_layer = true;
         }
 
@@ -170,12 +176,15 @@ bool test_load_tensor_from_gguf() {
     struct ggml_context * ctx = ggml_init(params);
     TEST_ASSERT(ctx != nullptr, "Failed to create ggml context");
 
-    // Try to load a tensor (token embedding is usually present and not too large)
+    // Try to load a tensor (codec_embedding is present in Qwen3-TTS)
     // Try different naming conventions
     const char* tensor_names[] = {
         "token_embd.weight",
         "model.embed_tokens.weight",
         "model_embed_tokens_weight",
+        "talker_model_codec_embedding_weight",  // Qwen3-TTS talker codec embedding
+        "talker_code_predictor_model_codec_embedding_0_weight",  // Code predictor embedding
+        "speaker_encoder_asp_conv_weight",  // Speaker encoder
         nullptr
     };
 

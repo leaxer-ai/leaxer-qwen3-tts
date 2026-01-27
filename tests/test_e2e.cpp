@@ -56,8 +56,8 @@ bool test_e2e_dummy_output() {
         }
     }
 
-    // Write to WAV file to verify output works
-    int write_result = leaxer_qwen::io::write_wav("test_e2e.wav", audio, n_samples, sample_rate);
+    // Write to WAV file to verify output works (output/ folder)
+    int write_result = leaxer_qwen::io::write_wav("output/test_e2e.wav", audio, n_samples, sample_rate);
 
     free(audio);
 

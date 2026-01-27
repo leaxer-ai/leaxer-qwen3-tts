@@ -26,14 +26,14 @@ int main() {
         audio[i] = amplitude * sinf(2.0f * M_PI * frequency * t);
     }
 
-    // Write to test.wav
-    int result = leaxer_qwen::io::write_wav("test.wav", audio.data(), n_samples, sample_rate);
+    // Write to output/test.wav
+    int result = leaxer_qwen::io::write_wav("output/test_wav.wav", audio.data(), n_samples, sample_rate);
 
     if (result != 0) {
-        fprintf(stderr, "Failed to write test.wav\n");
+        fprintf(stderr, "Failed to write output/test_wav.wav\n");
         return 1;
     }
 
-    printf("Successfully wrote test.wav (1-second 440 Hz sine wave)\n");
+    printf("Successfully wrote output/test_wav.wav (1-second 440 Hz sine wave)\n");
     return 0;
 }
