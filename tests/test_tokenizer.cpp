@@ -10,6 +10,7 @@
 namespace leaxer_qwen {
 namespace io {
     bool load_vocab(const std::string& vocab_path);
+    bool load_merges(const std::string& merges_path);
     std::vector<int32_t> tokenize(const std::string& text);
     std::string token_to_string(int32_t id);
     int32_t string_to_token(const std::string& token);
@@ -21,6 +22,14 @@ bool test_load_vocab() {
     bool loaded = leaxer_qwen::io::load_vocab(vocab_path);
     TEST_ASSERT(loaded, "should load vocab.json");
     TEST_PASS("vocab loading");
+    return true;
+}
+
+bool test_load_merges() {
+    const char* merges_path = "../models/Qwen3-TTS-12Hz-0.6B-CustomVoice/merges.txt";
+    bool loaded = leaxer_qwen::io::load_merges(merges_path);
+    TEST_ASSERT(loaded, "should load merges.txt");
+    TEST_PASS("merges loading");
     return true;
 }
 
@@ -89,6 +98,7 @@ int main() {
     printf("============================\n\n");
 
     test_load_vocab();
+    test_load_merges();
     test_token_to_id();
     test_id_to_token();
     test_tokenize_empty();

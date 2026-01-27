@@ -9,9 +9,17 @@
 #include <sstream>
 #include <stdexcept>
 #include <cctype>
+#include <cstring>
 
 namespace leaxer_qwen {
 namespace io {
+
+// Hash function for string pairs (for merge_rank_)
+struct PairHash {
+    std::size_t operator()(const std::pair<std::string, std::string>& p) const {
+        return std::hash<std::string>{}(p.first) ^ (std::hash<std::string>{}(p.second) << 1);
+    }
+};
 
 // Helper to parse hex digit
 static int hex_digit(char c) {
@@ -206,7 +214,7 @@ static bool parse_vocab_json(const std::string& path,
 
 class BPETokenizer {
 public:
-    BPETokenizer() : vocab_loaded_(false) {}
+    BPETokenizer() : vocab_loaded_(false), merges_loaded_(false) {}
 
     bool load_vocab(const std::string& vocab_path) {
         token_to_id_.clear();
@@ -218,6 +226,59 @@ public:
 
         vocab_loaded_ = true;
         return true;
+    }
+
+    bool load_merges(const std::string& merges_path) {
+        merges_.clear();
+        merge_rank_.clear();
+
+        FILE* file = fopen(merges_path.c_str(), "r");
+        if (!file) {
+            fprintf(stderr, "Failed to open merges file: %s\n", merges_path.c_str());
+            return false;
+        }
+
+        char line[1024];
+        int rank = 0;
+        int count = 0;
+
+        while (fgets(line, sizeof(line), file)) {
+            // Remove newline
+            size_t len = strlen(line);
+            while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+                line[--len] = '\0';
+            }
+
+            if (len == 0) {
+                continue; // Skip empty lines
+            }
+
+            // Parse space-separated pair
+            char* space = strchr(line, ' ');
+            if (!space) {
+                fprintf(stderr, "Invalid merge line (no space): %s\n", line);
+                continue;
+            }
+
+            *space = '\0'; // Split at space
+            std::string token1(line);
+            std::string token2(space + 1);
+
+            // Store merge pair with its rank (order)
+            merges_.push_back({token1, token2});
+            merge_rank_[{token1, token2}] = rank;
+            rank++;
+            count++;
+
+            if (count % 10000 == 0) {
+                fprintf(stderr, "Loaded %d merge rules...\n", count);
+            }
+        }
+
+        fclose(file);
+        fprintf(stderr, "Successfully loaded %d merge rules\n", count);
+        merges_loaded_ = true;
+        return !merges_.empty();
     }
 
     std::vector<int32_t> tokenize(const std::string& text) {
@@ -281,14 +342,27 @@ public:
         return vocab_loaded_;
     }
 
+    bool merges_loaded() const {
+        return merges_loaded_;
+    }
+
     size_t vocab_size() const {
         return token_to_id_.size();
     }
 
+    size_t merges_size() const {
+        return merges_.size();
+    }
+
 private:
     bool vocab_loaded_;
+    bool merges_loaded_;
     std::unordered_map<std::string, int32_t> token_to_id_;
     std::unordered_map<int32_t, std::string> id_to_token_;
+
+    // BPE merge rules
+    std::vector<std::pair<std::string, std::string>> merges_;
+    std::unordered_map<std::pair<std::string, std::string>, int, PairHash> merge_rank_;
 };
 
 // Global tokenizer instance - use function-local static for lazy initialization
@@ -300,6 +374,10 @@ static BPETokenizer& get_tokenizer() {
 // Public API functions
 bool load_vocab(const std::string& vocab_path) {
     return get_tokenizer().load_vocab(vocab_path);
+}
+
+bool load_merges(const std::string& merges_path) {
+    return get_tokenizer().load_merges(merges_path);
 }
 
 std::vector<int32_t> tokenize(const std::string& text) {
