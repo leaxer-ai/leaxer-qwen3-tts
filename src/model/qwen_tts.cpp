@@ -6,6 +6,7 @@
 #include "common.h"
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 namespace leaxer_qwen {
 
@@ -356,6 +357,81 @@ int generate_tokens(
     }
 
     return current_len;
+}
+
+// Speaker Embedding Lookup
+// CustomVoice model has built-in speaker embeddings (aiden, ryan, serena, vivian, etc.)
+// Each speaker has a pre-computed embedding vector stored in the model weights
+// This function retrieves the embedding tensor for a given speaker name
+//
+// Parameters:
+//   - ctx: ggml context for tensor allocation
+//   - speaker_name: name of the speaker (case-insensitive)
+//   - speaker_embeddings: tensor containing all speaker embeddings [n_speakers, embedding_dim]
+// Returns: tensor containing the speaker embedding [embedding_dim] or default speaker if unknown
+struct ggml_tensor * get_speaker_embedding(
+    struct ggml_context * ctx,
+    const char * speaker_name,
+    struct ggml_tensor * speaker_embeddings) {
+
+    // Mapping of speaker names to indices
+    // CustomVoice model built-in speakers (0.6B model)
+    struct SpeakerMapping {
+        const char * name;
+        int index;
+    };
+
+    static const SpeakerMapping speaker_map[] = {
+        {"aiden", 0},
+        {"ryan", 1},
+        {"serena", 2},
+        {"vivian", 3},
+        {"aria", 4},
+        {"emma", 5},
+        {"sophia", 6},
+        {nullptr, 0}  // Default fallback
+    };
+
+    // Convert speaker_name to lowercase for case-insensitive comparison
+    char speaker_lower[64] = {0};
+    int i = 0;
+    while (speaker_name[i] && i < 63) {
+        speaker_lower[i] = (speaker_name[i] >= 'A' && speaker_name[i] <= 'Z')
+                          ? (speaker_name[i] + 32)
+                          : speaker_name[i];
+        i++;
+    }
+    speaker_lower[i] = '\0';
+
+    // Look up speaker index
+    int speaker_idx = 0;  // Default to first speaker (aiden)
+    for (int j = 0; speaker_map[j].name != nullptr; j++) {
+        if (strcmp(speaker_lower, speaker_map[j].name) == 0) {
+            speaker_idx = speaker_map[j].index;
+            break;
+        }
+    }
+
+    // Extract speaker embedding from the embeddings tensor
+    // speaker_embeddings shape: [embedding_dim, n_speakers]
+    // We need to extract column speaker_idx
+    int embedding_dim = speaker_embeddings->ne[0];
+    int n_speakers = speaker_embeddings->ne[1];
+
+    // Clamp speaker_idx to valid range
+    if (speaker_idx >= n_speakers) {
+        speaker_idx = 0;  // Fallback to default
+    }
+
+    // Create a view into the speaker embeddings tensor for the selected speaker
+    struct ggml_tensor * speaker_emb = ggml_view_1d(
+        ctx,
+        speaker_embeddings,
+        embedding_dim,
+        speaker_idx * embedding_dim * ggml_element_size(speaker_embeddings)
+    );
+
+    return speaker_emb;
 }
 
 // TODO: Implement full TTS model

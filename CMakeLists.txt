@@ -143,6 +143,11 @@ if(LEAXER_QWEN_BUILD_TESTS)
     add_executable(test_real_model tests/test_real_model.cpp)
     target_link_libraries(test_real_model PRIVATE leaxer_qwen_lib)
     add_test(NAME real_model COMMAND test_real_model)
+
+    # Speaker embedding test
+    add_executable(test_speaker_embedding tests/test_speaker_embedding.cpp)
+    target_link_libraries(test_speaker_embedding PRIVATE leaxer_qwen_lib)
+    add_test(NAME speaker_embedding COMMAND test_speaker_embedding)
 endif()
 
 # Install
