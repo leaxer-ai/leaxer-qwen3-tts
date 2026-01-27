@@ -3,6 +3,8 @@
 
 #include "ggml.h"
 #include "common.h"
+#include <cmath>
+#include <cstdint>
 
 namespace leaxer_qwen {
 
@@ -114,6 +116,122 @@ struct ggml_tensor * llm_forward(
     struct ggml_tensor * logits = ggml_mul_mat(ctx, lm_head_weight, normalized);
 
     return logits;
+}
+
+// Token Sampling
+// Implements temperature, top-k, and top-p (nucleus) sampling from logits
+// Parameters:
+//   - logits: [vocab_size] raw logits from model
+//   - vocab_size: size of vocabulary
+//   - temperature: sampling temperature (>1 = more random, <1 = more deterministic, 0 = greedy)
+//   - top_k: keep only top-k highest probability tokens (0 = disabled)
+//   - top_p: keep tokens with cumulative probability >= top_p (1.0 = disabled)
+//   - rng_state: random number generator state (simple LCG)
+// Returns: sampled token ID
+int sample_token(
+    const float * logits,
+    int vocab_size,
+    float temperature,
+    int top_k,
+    float top_p,
+    uint64_t * rng_state) {
+
+    // Greedy sampling (argmax)
+    if (temperature <= 0.0f) {
+        int max_idx = 0;
+        float max_val = logits[0];
+        for (int i = 1; i < vocab_size; i++) {
+            if (logits[i] > max_val) {
+                max_val = logits[i];
+                max_idx = i;
+            }
+        }
+        return max_idx;
+    }
+
+    // Allocate space for token index/probability pairs
+    struct TokenProb {
+        int id;
+        float prob;
+    };
+    TokenProb * candidates = new TokenProb[vocab_size];
+
+    // Apply temperature and softmax
+    float max_logit = logits[0];
+    for (int i = 1; i < vocab_size; i++) {
+        if (logits[i] > max_logit) max_logit = logits[i];
+    }
+
+    float sum_exp = 0.0f;
+    for (int i = 0; i < vocab_size; i++) {
+        candidates[i].id = i;
+        candidates[i].prob = expf((logits[i] - max_logit) / temperature);
+        sum_exp += candidates[i].prob;
+    }
+
+    // Normalize to probabilities
+    for (int i = 0; i < vocab_size; i++) {
+        candidates[i].prob /= sum_exp;
+    }
+
+    // Sort by probability (descending) for top-k/top-p
+    for (int i = 0; i < vocab_size - 1; i++) {
+        for (int j = i + 1; j < vocab_size; j++) {
+            if (candidates[j].prob > candidates[i].prob) {
+                TokenProb tmp = candidates[i];
+                candidates[i] = candidates[j];
+                candidates[j] = tmp;
+            }
+        }
+    }
+
+    // Apply top-k filtering
+    int n_candidates = vocab_size;
+    if (top_k > 0 && top_k < vocab_size) {
+        n_candidates = top_k;
+    }
+
+    // Apply top-p (nucleus) filtering
+    if (top_p < 1.0f) {
+        float cumsum = 0.0f;
+        int nucleus_size = 0;
+        for (int i = 0; i < n_candidates; i++) {
+            cumsum += candidates[i].prob;
+            nucleus_size++;
+            if (cumsum >= top_p) break;
+        }
+        n_candidates = nucleus_size;
+    }
+
+    // Renormalize probabilities
+    float prob_sum = 0.0f;
+    for (int i = 0; i < n_candidates; i++) {
+        prob_sum += candidates[i].prob;
+    }
+    for (int i = 0; i < n_candidates; i++) {
+        candidates[i].prob /= prob_sum;
+    }
+
+    // Sample from the distribution using simple LCG RNG
+    // LCG parameters: a=1664525, c=1013904223, m=2^32
+    *rng_state = (*rng_state * 1664525ULL + 1013904223ULL) & 0xFFFFFFFFULL;
+    float rand_val = (float)(*rng_state) / (float)0x100000000ULL;
+
+    // Select token based on cumulative probability
+    float cumsum = 0.0f;
+    for (int i = 0; i < n_candidates; i++) {
+        cumsum += candidates[i].prob;
+        if (rand_val < cumsum) {
+            int result = candidates[i].id;
+            delete[] candidates;
+            return result;
+        }
+    }
+
+    // Fallback (should never reach here)
+    int result = candidates[n_candidates - 1].id;
+    delete[] candidates;
+    return result;
 }
 
 // TODO: Implement full TTS model
