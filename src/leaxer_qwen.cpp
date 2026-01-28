@@ -712,7 +712,9 @@ float * tts_generate(
     constexpr int IM_START_TOKEN_ID = 151644;
     constexpr int IM_END_TOKEN_ID = 151645;
     constexpr int TTS_BOS_TOKEN_ID = 151672;
-    constexpr int CODEC_EOS_ID = 4198;  // Note: may be out of range
+    // Codec EOS token from GGUF metadata (qwen3.tts.codec_eos_id)
+    // Note: CustomVoice model uses 2150, not Python config default of 4198
+    constexpr int CODEC_EOS_ID = 2150;
 
     // Step 1: Tokenize input text
     std::string text_str(text);
@@ -790,8 +792,21 @@ float * tts_generate(
     int codec_start = (int)prompt.size();
     int codec_len = n_generated - codec_start;
 
+    // Debug: show generated tokens (first and last few)
+    printf("Generated tokens (codec portion, start=%d, len=%d):\n", codec_start, codec_len);
+    printf("  First 10: ");
+    for (int i = codec_start; i < std::min(n_generated, codec_start + 10); i++) {
+        printf("%d ", generated_tokens[i]);
+    }
+    printf("\n  Last 10: ");
+    for (int i = std::max(codec_start, n_generated - 10); i < n_generated; i++) {
+        printf("%d ", generated_tokens[i]);
+    }
+    printf("\n  EOS token would be: %d\n", CODEC_EOS_ID);
+
     // Remove EOS token if present
     if (codec_len > 0 && generated_tokens[n_generated - 1] == CODEC_EOS_ID) {
+        printf("  (Last token is EOS, removing it)\n");
         codec_len--;
     }
 

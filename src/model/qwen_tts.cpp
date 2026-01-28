@@ -49,9 +49,12 @@ constexpr int IM_END_TOKEN_ID = 151645;
 constexpr int TTS_PAD_TOKEN_ID = 151671;
 constexpr int TTS_BOS_TOKEN_ID = 151672;
 constexpr int TTS_EOS_TOKEN_ID = 151673;
-constexpr int CODEC_PAD_ID = 4196;
-constexpr int CODEC_BOS_ID = 4197;
-constexpr int CODEC_EOS_ID = 4198;
+// Codec special tokens (from GGUF metadata - CustomVoice model)
+// Note: These values differ from the Python config defaults (4196-4198)
+// The actual values come from qwen3.tts.codec_* GGUF metadata fields
+constexpr int CODEC_PAD_ID = 2148;
+constexpr int CODEC_BOS_ID = 2149;
+constexpr int CODEC_EOS_ID = 2150;
 
 // Talker Forward Pass (Qwen3-TTS LLM)
 // Architecture: Embedding → Text Projection → 28 Transformer Blocks (with RoPE) → Final Norm → Output Projection
@@ -180,6 +183,12 @@ struct ggml_tensor * llm_forward(
                           layer_weights, n_layers, norm_weight, lm_head_weight);
 }
 
+// Codec special token constants (for suppression during sampling)
+// Audio codes are 0-2047, special tokens are 2148-2150
+constexpr int CODEC_AUDIO_MAX = 2047;    // Max valid audio code
+constexpr int CODEC_SUPPRESS_START = 2048;  // Start of suppression range
+// EOS (2150) is allowed, all other special tokens are suppressed
+
 // Token Sampling
 // Implements temperature, top-k, and top-p (nucleus) sampling from logits
 // Parameters:
@@ -189,6 +198,7 @@ struct ggml_tensor * llm_forward(
 //   - top_k: keep only top-k highest probability tokens (0 = disabled)
 //   - top_p: keep tokens with cumulative probability >= top_p (1.0 = disabled)
 //   - rng_state: random number generator state (simple LCG)
+//   - eos_token_id: EOS token to allow (default -1 = no special handling)
 // Returns: sampled token ID
 int sample_token(
     const float * logits,
@@ -196,18 +206,32 @@ int sample_token(
     float temperature,
     int top_k,
     float top_p,
-    uint64_t * rng_state) {
+    uint64_t * rng_state,
+    int eos_token_id = -1) {
+
+    // Create modified logits with suppressed tokens
+    float * mod_logits = new float[vocab_size];
+    memcpy(mod_logits, logits, vocab_size * sizeof(float));
+
+    // Suppress tokens in range [2048, vocab_size) except EOS
+    // This follows Python behavior: suppress_tokens = range(vocab_size-1024, vocab_size) except EOS
+    for (int i = CODEC_SUPPRESS_START; i < vocab_size; i++) {
+        if (i != eos_token_id) {
+            mod_logits[i] = -1e10f;  // Very negative = effectively zero probability
+        }
+    }
 
     // Greedy sampling (argmax)
     if (temperature <= 0.0f) {
         int max_idx = 0;
-        float max_val = logits[0];
+        float max_val = mod_logits[0];
         for (int i = 1; i < vocab_size; i++) {
-            if (logits[i] > max_val) {
-                max_val = logits[i];
+            if (mod_logits[i] > max_val) {
+                max_val = mod_logits[i];
                 max_idx = i;
             }
         }
+        delete[] mod_logits;
         return max_idx;
     }
 
@@ -219,17 +243,18 @@ int sample_token(
     TokenProb * candidates = new TokenProb[vocab_size];
 
     // Apply temperature and softmax
-    float max_logit = logits[0];
+    float max_logit = mod_logits[0];
     for (int i = 1; i < vocab_size; i++) {
-        if (logits[i] > max_logit) max_logit = logits[i];
+        if (mod_logits[i] > max_logit) max_logit = mod_logits[i];
     }
 
     float sum_exp = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
         candidates[i].id = i;
-        candidates[i].prob = expf((logits[i] - max_logit) / temperature);
+        candidates[i].prob = expf((mod_logits[i] - max_logit) / temperature);
         sum_exp += candidates[i].prob;
     }
+    delete[] mod_logits;
 
     // Normalize to probabilities
     for (int i = 0; i < vocab_size; i++) {
@@ -403,14 +428,15 @@ int generate_tokens(
         // Extract logits for last token position
         float * last_logits = logits_data + vocab_size * (seq_len_out - 1);
 
-        // Sample next token
+        // Sample next token (suppress special tokens except EOS)
         int next_token = sample_token(
             last_logits,
             vocab_size,
             temperature,
             top_k,
             top_p,
-            rng_state
+            rng_state,
+            eos_token_id
         );
 
         // Free this pass's context before continuing
@@ -680,7 +706,7 @@ int generate_tokens_cached(
         float * logits_data = (float *)logits->data;
         float * last_logits = logits_data + vocab_size * (prompt_len - 1);
 
-        int next_token = sample_token(last_logits, vocab_size, temperature, top_k, top_p, rng_state);
+        int next_token = sample_token(last_logits, vocab_size, temperature, top_k, top_p, rng_state, eos_token_id);
         output_tokens[current_len++] = next_token;
 
         ggml_free(ctx);
@@ -728,7 +754,7 @@ int generate_tokens_cached(
         int vocab_size = logits->ne[0];
         float * logits_data = (float *)logits->data;
 
-        int next_token = sample_token(logits_data, vocab_size, temperature, top_k, top_p, rng_state);
+        int next_token = sample_token(logits_data, vocab_size, temperature, top_k, top_p, rng_state, eos_token_id);
 
         ggml_free(ctx);
 

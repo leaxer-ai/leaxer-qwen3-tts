@@ -367,16 +367,20 @@ struct ggml_tensor * code_predictor_forward(
         }
 
         const float * head_data = (const float *)head->data;
-        int head_out_dim = head->ne[0];
-        int head_in_dim = head->ne[1];
+        // GGUF shape [1024, 2048] = [hidden_dim, vocab_size]
+        // ne[0] = 1024 = hidden dim (input), ne[1] = 2048 = vocab size (output)
+        int head_in_dim = head->ne[0];   // hidden_dim = 1024
+        int head_out_dim = head->ne[1];  // vocab_size = 2048
 
         for (int t = 0; t < seq_len; t++) {
             memset(logits, 0, CODEBOOK_VOCAB * sizeof(float));
 
+            // Linear: output[v] = sum_d(hidden[d] * weight[d, v])
+            // GGUF layout: weight[d, v] = head_data[d + v * head_in_dim]
             for (int d = 0; d < head_in_dim && d < hidden_dim; d++) {
                 float h = hidden_tmp[t * hidden_dim + d];
                 for (int v = 0; v < head_out_dim && v < CODEBOOK_VOCAB; v++) {
-                    logits[v] += h * head_data[v + d * head_out_dim];
+                    logits[v] += h * head_data[d + v * head_in_dim];
                 }
             }
 

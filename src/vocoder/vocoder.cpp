@@ -133,7 +133,7 @@ static void conv1d_k1(
 
 // Apply linear projection (matrix multiply)
 // input: [seq_len, in_dim]
-// weight: [out_dim, in_dim]
+// weight: [out_dim, in_dim] - standard PyTorch layout
 // bias: [out_dim] or nullptr
 // output: [seq_len, out_dim]
 static void linear(
@@ -150,6 +150,32 @@ static void linear(
             float sum = bias ? bias[o] : 0.0f;
             for (int64_t i = 0; i < in_dim; i++) {
                 sum += input[t * in_dim + i] * weight[o * in_dim + i];
+            }
+            output[t * out_dim + o] = sum;
+        }
+    }
+}
+
+// Apply linear projection with transposed weight layout
+// input: [seq_len, in_dim]
+// weight: [in_dim, out_dim] - transposed layout (GGML style)
+// bias: [out_dim] or nullptr
+// output: [seq_len, out_dim]
+static void linear_transposed(
+    float * output,
+    const float * input,
+    const float * weight,
+    const float * bias,
+    int64_t seq_len,
+    int64_t in_dim,
+    int64_t out_dim
+) {
+    for (int64_t t = 0; t < seq_len; t++) {
+        for (int64_t o = 0; o < out_dim; o++) {
+            float sum = bias ? bias[o] : 0.0f;
+            for (int64_t i = 0; i < in_dim; i++) {
+                // Weight stored as [in_dim, out_dim], access element (i, o)
+                sum += input[t * in_dim + i] * weight[i * out_dim + o];
             }
             output[t * out_dim + o] = sum;
         }
@@ -181,9 +207,46 @@ static void rms_norm(
     }
 }
 
+// LayerNorm (with learnable bias, unlike RMSNorm)
+static void layer_norm(
+    float * output, const float * input,
+    const float * weight, const float * bias,
+    int64_t seq_len, int64_t dim, float eps = 1e-6f
+) {
+    for (int64_t t = 0; t < seq_len; t++) {
+        // Compute mean
+        float mean = 0.0f;
+        for (int64_t d = 0; d < dim; d++) {
+            mean += input[t * dim + d];
+        }
+        mean /= dim;
+
+        // Compute variance
+        float var = 0.0f;
+        for (int64_t d = 0; d < dim; d++) {
+            float diff = input[t * dim + d] - mean;
+            var += diff * diff;
+        }
+        var /= dim;
+
+        // Normalize, scale, and shift
+        float inv_std = 1.0f / sqrtf(var + eps);
+        for (int64_t d = 0; d < dim; d++) {
+            float normalized = (input[t * dim + d] - mean) * inv_std;
+            output[t * dim + d] = normalized * weight[d] + (bias ? bias[d] : 0.0f);
+        }
+    }
+}
+
 // SiLU activation (swish): x * sigmoid(x)
 static inline float silu(float x) {
     return x / (1.0f + expf(-x));
+}
+
+// GELU activation (Gaussian Error Linear Unit)
+static inline float gelu(float x) {
+    const float sqrt_2_pi = 0.7978845608f;
+    return 0.5f * x * (1.0f + tanhf(sqrt_2_pi * (x + 0.044715f * x * x * x)));
 }
 
 // SnakeBeta activation: x + (1/b) * sin^2(a * x)
@@ -250,8 +313,181 @@ static void conv1d_same_padding(
     }
 }
 
+// 1D convolution with arbitrary kernel size, padding, and dilation support
+// input: [seq_len, in_channels]
+// weight: [out_channels, in_channels, kernel_size] (PyTorch layout)
+// bias: [out_channels]
+// output: [seq_len, out_channels]
+// causal: if true, use causal padding (look back only); if false, use center padding
+static void conv1d_dilated(
+    float * output,
+    const float * input,
+    const float * weight,
+    const float * bias,
+    int64_t seq_len,
+    int64_t in_channels,
+    int64_t out_channels,
+    int kernel_size,
+    int dilation = 1,
+    bool causal = false
+) {
+    int dilated_size = 1 + (kernel_size - 1) * dilation;
+    // Causal: look back only (pad = dilated_size - 1)
+    // Center: symmetric padding (pad = dilated_size / 2)
+    int pad = causal ? (dilated_size - 1) : (dilated_size / 2);
+
+    for (int64_t t = 0; t < seq_len; t++) {
+        for (int64_t o = 0; o < out_channels; o++) {
+            float sum = bias ? bias[o] : 0.0f;
+            for (int k = 0; k < kernel_size; k++) {
+                int64_t t_in = t - pad + k * dilation;  // Dilated indexing
+                if (t_in >= 0 && t_in < seq_len) {
+                    for (int64_t i = 0; i < in_channels; i++) {
+                        // PyTorch layout: [out_channels, in_channels, kernel_size]
+                        sum += input[t_in * in_channels + i] *
+                               weight[(o * in_channels + i) * kernel_size + k];
+                    }
+                }
+            }
+            output[t * out_channels + o] = sum;
+        }
+    }
+}
+
+// Depthwise causal 1D convolution (each channel has its own separate kernel)
+// input: [seq_len, channels] (in [B,T,C] format, but B=1 implicit)
+// weight: [channels, 1, kernel_size] (PyTorch depthwise conv layout)
+// bias: [channels]
+// output: [seq_len, channels]
+static void depthwise_causal_conv1d(
+    float * output, const float * input,
+    const float * weight, const float * bias,
+    int64_t seq_len, int64_t channels, int kernel_size
+) {
+    // Causal padding: look back only (kernel_size - 1 zeros at beginning)
+    for (int64_t t = 0; t < seq_len; t++) {
+        for (int64_t c = 0; c < channels; c++) {
+            float sum = bias ? bias[c] : 0.0f;
+            for (int k = 0; k < kernel_size; k++) {
+                int64_t t_in = t - (kernel_size - 1) + k;
+                if (t_in >= 0) {
+                    // Depthwise: weight shape [channels, 1, kernel_size]
+                    // For channel c: weight[c * kernel_size + k]
+                    sum += input[t_in * channels + c] * weight[c * kernel_size + k];
+                }
+            }
+            output[t * channels + c] = sum;
+        }
+    }
+}
+
+// Helper to compute min/max of a buffer
+static void compute_range(const float * buf, int64_t n, float * min_out, float * max_out) {
+    float min_val = buf[0], max_val = buf[0];
+    for (int64_t i = 1; i < n; i++) {
+        if (buf[i] < min_val) min_val = buf[i];
+        if (buf[i] > max_val) max_val = buf[i];
+    }
+    *min_out = min_val;
+    *max_out = max_val;
+}
+
+// Full ConvNeXt block forward pass
+// Implements: dwconv -> permute -> layernorm -> pwconv1 -> GELU -> pwconv2 -> gamma -> permute -> residual
+// From Python (modeling_qwen3_tts_tokenizer_v2.py lines 210-242):
+//   input = hidden_states                           # Save for residual
+//   hidden_states = self.dwconv(hidden_states)      # Depthwise conv k=7, causal
+//   hidden_states = hidden_states.permute(0, 2, 1)  # [B,C,T] -> [B,T,C]
+//   hidden_states = self.norm(hidden_states)        # LayerNorm
+//   hidden_states = self.pwconv1(hidden_states)     # Linear: dim -> 4*dim
+//   hidden_states = self.act(hidden_states)         # GELU activation
+//   hidden_states = self.pwconv2(hidden_states)     # Linear: 4*dim -> dim
+//   hidden_states = self.gamma * hidden_states      # LayerScale
+//   hidden_states = hidden_states.permute(0, 2, 1)  # [B,T,C] -> [B,C,T]
+//   hidden_states = input + hidden_states           # Residual connection
+static void convnext_block_forward(
+    float * output, const float * input,
+    const model::VocoderConvNeXtBlock * block,
+    int64_t seq_len, int64_t channels,
+    int stage_id = 0  // For debug output (unused for now)
+) {
+    (void)stage_id;  // Suppress unused parameter warning
+
+    // Allocate temporary buffers
+    // Note: We work in [seq_len, channels] layout (already [T,C])
+    float * dw_out = (float *)malloc(seq_len * channels * sizeof(float));
+    float * norm_out = (float *)malloc(seq_len * channels * sizeof(float));
+    float * pw1_out = (float *)malloc(seq_len * 4 * channels * sizeof(float));
+    float * pw2_out = (float *)malloc(seq_len * channels * sizeof(float));
+
+    if (!dw_out || !norm_out || !pw1_out || !pw2_out) {
+        fprintf(stderr, "convnext_block_forward: failed to allocate buffers\n");
+        if (dw_out) free(dw_out);
+        if (norm_out) free(norm_out);
+        if (pw1_out) free(pw1_out);
+        if (pw2_out) free(pw2_out);
+        // Just copy input to output as fallback
+        memcpy(output, input, seq_len * channels * sizeof(float));
+        return;
+    }
+
+    // Convert F16 weights to F32
+    float * dw_w = convert_f16_to_f32(block->dwconv_weight);
+    float * dw_b = convert_f16_to_f32(block->dwconv_bias);
+    float * norm_w = convert_f16_to_f32(block->norm_weight);
+    float * norm_b = convert_f16_to_f32(block->norm_bias);
+    float * pw1_w = convert_f16_to_f32(block->pwconv1_weight);
+    float * pw1_b = convert_f16_to_f32(block->pwconv1_bias);
+    float * pw2_w = convert_f16_to_f32(block->pwconv2_weight);
+    float * pw2_b = convert_f16_to_f32(block->pwconv2_bias);
+    float * gamma = convert_f16_to_f32(block->gamma);
+
+    // 1. Depthwise causal conv (kernel=7)
+    // Input is [seq_len, channels], weight is [channels, 1, 7]
+    depthwise_causal_conv1d(dw_out, input, dw_w, dw_b, seq_len, channels, 7);
+
+    // 2. LayerNorm (operates on last dimension = channels)
+    // dw_out is already in [seq_len, channels] format
+    layer_norm(norm_out, dw_out, norm_w, norm_b, seq_len, channels);
+
+    // 3. Pointwise expansion (channels -> 4*channels) with GELU
+    // pw1_w shape in GGML: [channels, 4*channels] = [in_dim, out_dim] - transposed
+    linear_transposed(pw1_out, norm_out, pw1_w, pw1_b, seq_len, channels, 4 * channels);
+
+    for (int64_t i = 0; i < seq_len * 4 * channels; i++) {
+        pw1_out[i] = gelu(pw1_out[i]);
+    }
+
+    // 4. Pointwise projection (4*channels -> channels)
+    // pw2_w shape in GGML: [4*channels, channels] = [in_dim, out_dim] - transposed
+    linear_transposed(pw2_out, pw1_out, pw2_w, pw2_b, seq_len, 4 * channels, channels);
+
+    // 5. Apply gamma (LayerScale) and residual
+    for (int64_t t = 0; t < seq_len; t++) {
+        for (int64_t c = 0; c < channels; c++) {
+            output[t * channels + c] = input[t * channels + c] + gamma[c] * pw2_out[t * channels + c];
+        }
+    }
+
+    // Cleanup
+    free(dw_out);
+    free(norm_out);
+    free(pw1_out);
+    free(pw2_out);
+    free(dw_w);
+    if (dw_b) free(dw_b);
+    free(norm_w);
+    if (norm_b) free(norm_b);
+    free(pw1_w);
+    if (pw1_b) free(pw1_b);
+    free(pw2_w);
+    if (pw2_b) free(pw2_b);
+    free(gamma);
+}
+
 // ResBlock forward pass
 // Structure: x_in = x; x = act1(x) -> conv1(x) -> act2(x) -> conv2(x) -> x + x_in
+// Original uses dilations (1, 3, 9) for the 3 ResBlocks per upsample stage
 static void resblock_forward(
     float * output,
     const float * input,
@@ -259,7 +495,8 @@ static void resblock_forward(
     float * act_buf,
     float * conv_buf,
     int64_t seq_len,
-    int64_t channels
+    int64_t channels,
+    int dilation = 1  // Dilation for conv1 (conv2 is always dilation=1)
 ) {
     // Convert weights to F32 (they may be F16)
     float * act1_alpha = convert_f16_to_f32(weights->act1_alpha);
@@ -274,17 +511,18 @@ static void resblock_forward(
     // act1: SnakeBeta
     snake_beta(act_buf, input, act1_alpha, act1_beta, seq_len, channels);
 
-    // conv1: kernel=7, same channels
+    // conv1: kernel=7, same channels, with dilation, CAUSAL
     // PyTorch stores as [out, in, kernel] = [channels, channels, 7]
-    conv1d_same_padding(conv_buf, act_buf, conv1_w, conv1_b,
-                        seq_len, channels, channels, 7, true);
+    // Original Python uses CausalConvNet for both convolutions
+    conv1d_dilated(conv_buf, act_buf, conv1_w, conv1_b,
+                   seq_len, channels, channels, 7, dilation, true);  // causal=true
 
     // act2: SnakeBeta
     snake_beta(act_buf, conv_buf, act2_alpha, act2_beta, seq_len, channels);
 
-    // conv2: kernel=1, same channels (pointwise)
-    conv1d_same_padding(conv_buf, act_buf, conv2_w, conv2_b,
-                        seq_len, channels, channels, 1, true);
+    // conv2: kernel=1, same channels (pointwise, always dilation=1), CAUSAL
+    conv1d_dilated(conv_buf, act_buf, conv2_w, conv2_b,
+                   seq_len, channels, channels, 1, 1, true);  // causal=true
 
     // Residual connection: output = conv_buf + input
     for (int64_t i = 0; i < seq_len * channels; i++) {
@@ -583,11 +821,16 @@ static float * convert_f16_to_f32(const struct ggml_tensor * tensor) {
     return f32_data;
 }
 
-// Transposed 1D convolution for upsampling
+// Transposed 1D convolution for upsampling (causal, matching Python CausalTransConvNet)
 // input: [seq_len, in_channels]
 // weight: [kernel_size, out_channels, in_channels] - GGML layout (ne[0]=kernel, ne[1]=out_ch, ne[2]=in_ch)
 // bias: [out_channels]
 // output: [seq_len * stride, out_channels]
+//
+// Python CausalTransConvNet does:
+//   1. ConvTranspose1d produces raw_len = (seq_len - 1) * stride + kernel_size
+//   2. Trim left_pad = kernel_size - stride from the start (causal)
+//   3. Final output length = raw_len - left_pad = seq_len * stride
 static void conv1d_transpose(
     float * output,
     const float * input,
@@ -600,32 +843,41 @@ static void conv1d_transpose(
     int stride,
     int64_t output_buffer_size  // For bounds checking
 ) {
-    int64_t out_len = seq_len * stride;
-    int64_t required_output_size = out_len * out_channels;
+    // Raw output length before trimming (PyTorch ConvTranspose1d formula)
+    int64_t raw_len = (seq_len - 1) * stride + kernel_size;
+    // Causal trimming: remove left_pad from the beginning
+    int64_t left_pad = kernel_size - stride;
+    int64_t final_len = raw_len - left_pad;  // = seq_len * stride
 
+    int64_t required_output_size = final_len * out_channels;
     if (required_output_size > output_buffer_size) {
         fprintf(stderr, "conv_transpose: output buffer too small! need %lld, have %lld\n",
                 (long long)required_output_size, (long long)output_buffer_size);
         return;
     }
 
-    // Initialize with bias
-    for (int64_t t = 0; t < out_len; t++) {
+    // Allocate raw buffer for the full transposed conv output
+    float * raw_output = (float *)malloc(raw_len * out_channels * sizeof(float));
+    if (!raw_output) {
+        fprintf(stderr, "conv_transpose: failed to allocate raw buffer\n");
+        return;
+    }
+
+    // Initialize raw output with bias
+    for (int64_t t = 0; t < raw_len; t++) {
         for (int64_t o = 0; o < out_channels; o++) {
-            output[t * out_channels + o] = bias ? bias[o] : 0.0f;
+            raw_output[t * out_channels + o] = bias ? bias[o] : 0.0f;
         }
     }
 
-    // Transposed convolution
+    // Transposed convolution into raw buffer
     // GGML layout: weight[i * (out_channels * kernel_size) + o * kernel_size + k]
-    // i.e., for element (k, o, i): data[i * ne[0]*ne[1] + o * ne[0] + k]
     int64_t weight_stride = out_channels * kernel_size;
 
-    // Full transposed convolution computation
     for (int64_t t_in = 0; t_in < seq_len; t_in++) {
         for (int k = 0; k < kernel_size; k++) {
             int64_t t_out = t_in * stride + k;
-            if (t_out >= out_len) continue;
+            // No bounds check needed - raw_len is exactly the right size
 
             for (int64_t i = 0; i < in_channels; i++) {
                 int64_t in_idx = t_in * in_channels + i;
@@ -635,11 +887,16 @@ static void conv1d_transpose(
                 for (int64_t o = 0; o < out_channels; o++) {
                     int64_t w_idx = weight_base + o * kernel_size;
                     int64_t out_idx = t_out * out_channels + o;
-                    output[out_idx] += in_val * weight[w_idx];
+                    raw_output[out_idx] += in_val * weight[w_idx];
                 }
             }
         }
     }
+
+    // Copy trimmed result to output (skip first left_pad frames for causal)
+    memcpy(output, raw_output + left_pad * out_channels, final_len * out_channels * sizeof(float));
+
+    free(raw_output);
 }
 
 // Full vocoder forward pass
@@ -904,6 +1161,7 @@ void vocoder_full_forward(
     float * convnext_in = post_trans;  // Start with post_trans output (1024-dim)
     float * convnext_out = nullptr;
 
+    // Apply ConvNeXt transposed conv for upsampling (skip the ConvNeXt block itself for now)
     if (weights->upsample_convnext[0].transconv_weight) {
         printf("  vocoder: applying upsample ConvNeXt blocks (2 stages)\n");
 
@@ -920,37 +1178,67 @@ void vocoder_full_forward(
             for (int stage = 0; stage < 2; stage++) {
                 const model::VocoderConvNeXtBlock * block = &weights->upsample_convnext[stage];
                 int stride = 2;
-                int64_t out_len = convnext_len * stride;
+                int64_t final_len = convnext_len * stride;  // Expected output length
 
                 // Step 6.1: Transposed convolution for upsampling (stride=2, kernel=4)
                 float * tc_w = convert_f16_to_f32(block->transconv_weight);
                 float * tc_b = convert_f16_to_f32(block->transconv_bias);
                 int kernel_size = (int)block->transconv_weight->ne[0];
 
-                // Transposed conv: input [T, 1024] -> output [T*2, 1024]
+                // Debug: print weight shape and range
+                printf("  vocoder: ConvNeXt stage %d transconv weight shape: [%lld, %lld, %lld], kernel=%d\n",
+                       stage,
+                       (long long)block->transconv_weight->ne[0],
+                       (long long)block->transconv_weight->ne[1],
+                       (long long)block->transconv_weight->ne[2],
+                       kernel_size);
+
+                float w_min = tc_w[0], w_max = tc_w[0];
+                int64_t w_size = block->transconv_weight->ne[0] * block->transconv_weight->ne[1] * block->transconv_weight->ne[2];
+                for (int64_t i = 0; i < w_size; i++) {
+                    if (tc_w[i] < w_min) w_min = tc_w[i];
+                    if (tc_w[i] > w_max) w_max = tc_w[i];
+                }
+                printf("  vocoder: ConvNeXt stage %d transconv weight range: [%.6f, %.6f]\n", stage, w_min, w_max);
+
+                // Raw output length before trimming (PyTorch formula)
+                int64_t raw_len = (convnext_len - 1) * stride + kernel_size;
+                // Causal trimming: remove left_pad from the beginning
+                int64_t left_pad = kernel_size - stride;
+
+                // Transposed conv: input [T, 1024] -> raw output [(T-1)*2+kernel, 1024]
                 // PyTorch ConvTranspose1d: weight [in_ch, out_ch, kernel]
                 int64_t in_ch = CONCAT_DIM;
                 int64_t out_ch = CONCAT_DIM;
 
-                // Initialize output with bias
-                for (int64_t t = 0; t < out_len; t++) {
+                // Allocate temporary raw buffer
+                float * raw_buf = (float *)malloc(raw_len * out_ch * sizeof(float));
+                if (!raw_buf) {
+                    fprintf(stderr, "  vocoder: failed to allocate raw_buf for ConvNeXt transposed conv\n");
+                    free(tc_w);
+                    if (tc_b) free(tc_b);
+                    continue;
+                }
+
+                // Initialize raw buffer with bias
+                for (int64_t t = 0; t < raw_len; t++) {
                     for (int64_t c = 0; c < out_ch; c++) {
-                        cn_buf2[t * out_ch + c] = tc_b ? tc_b[c] : 0.0f;
+                        raw_buf[t * out_ch + c] = tc_b ? tc_b[c] : 0.0f;
                     }
                 }
 
-                // Transposed convolution
+                // Transposed convolution into raw buffer
                 for (int64_t t_in = 0; t_in < convnext_len; t_in++) {
                     for (int k = 0; k < kernel_size; k++) {
                         int64_t t_out = t_in * stride + k;
-                        if (t_out >= out_len) continue;
+                        // No bounds check needed - raw_len is exactly right
 
                         for (int64_t i = 0; i < in_ch; i++) {
                             float in_val = cn_buf1[t_in * in_ch + i];
                             for (int64_t o = 0; o < out_ch; o++) {
                                 // PyTorch ConvTranspose1d: [in, out, kernel]
                                 int64_t w_idx = (i * out_ch + o) * kernel_size + k;
-                                cn_buf2[t_out * out_ch + o] += in_val * tc_w[w_idx];
+                                raw_buf[t_out * out_ch + o] += in_val * tc_w[w_idx];
                             }
                         }
                     }
@@ -959,23 +1247,43 @@ void vocoder_full_forward(
                 free(tc_w);
                 if (tc_b) free(tc_b);
 
-                // Trim output (similar to Python trimming)
-                int pad = kernel_size - stride;
-                int left_pad = (pad + 1) / 2;
-                int right_pad = pad - left_pad;
-                int64_t trimmed_len = out_len - left_pad - right_pad;
-                if (trimmed_len > 0 && left_pad > 0) {
-                    memmove(cn_buf2, cn_buf2 + left_pad * out_ch, trimmed_len * out_ch * sizeof(float));
+                // Copy trimmed result to cn_buf2 (skip first left_pad frames for causal)
+                memcpy(cn_buf2, raw_buf + left_pad * out_ch, final_len * out_ch * sizeof(float));
+                free(raw_buf);
+
+                int64_t out_len = final_len;
+
+                // Debug: check transconv output range (before ConvNeXt block)
+                float tc_min = cn_buf2[0], tc_max = cn_buf2[0];
+                for (int64_t i = 0; i < out_len * out_ch; i++) {
+                    if (cn_buf2[i] < tc_min) tc_min = cn_buf2[i];
+                    if (cn_buf2[i] > tc_max) tc_max = cn_buf2[i];
                 }
-                out_len = trimmed_len;
+                printf("  vocoder: ConvNeXt stage %d after transconv: [%.4f, %.4f]\n", stage, tc_min, tc_max);
 
                 // Step 6.2: ConvNeXt block (depthwise conv -> layernorm -> pointwise)
-                // This is optional - only apply if we have the weights
+                // Apply full ConvNeXt block if we have the weights
                 if (block->dwconv_weight) {
-                    // TODO: Implement full ConvNeXt block
-                    // For now, just pass through
-                    printf("  vocoder: ConvNeXt stage %d - TODO: implement full ConvNeXt block\n", stage);
+                    // Input and output are both cn_buf2 (in-place update)
+                    // Allocate temp buffer for the output
+                    float * cn_temp = (float *)malloc(out_len * CONCAT_DIM * sizeof(float));
+                    if (cn_temp) {
+                        convnext_block_forward(cn_temp, cn_buf2, block, out_len, CONCAT_DIM, stage);
+                        memcpy(cn_buf2, cn_temp, out_len * CONCAT_DIM * sizeof(float));
+                        free(cn_temp);
+                        printf("  vocoder: ConvNeXt stage %d complete\n", stage);
+                    } else {
+                        printf("  vocoder: ConvNeXt stage %d - failed to allocate temp buffer\n", stage);
+                    }
                 }
+
+                // Debug: check output range
+                float cn_min = cn_buf2[0], cn_max = cn_buf2[0];
+                for (int64_t i = 0; i < out_len * CONCAT_DIM; i++) {
+                    if (cn_buf2[i] < cn_min) cn_min = cn_buf2[i];
+                    if (cn_buf2[i] > cn_max) cn_max = cn_buf2[i];
+                }
+                printf("  vocoder: ConvNeXt stage %d range: [%.4f, %.4f]\n", stage, cn_min, cn_max);
 
                 // Swap buffers
                 float * temp = cn_buf1;
@@ -1138,12 +1446,15 @@ void vocoder_full_forward(
             float * rb_conv_buf = (float *)malloc(out_len * out_ch * sizeof(float));
 
             if (rb_act_buf && rb_conv_buf) {
+                // Original uses dilations (1, 3, 9) for the 3 ResBlocks per stage
+                const int dilations[3] = {1, 3, 9};
                 for (int rb = 0; rb < 3; rb++) {
                     const model::VocoderResBlock * resblock = &upsample_stage->resblocks[rb];
                     if (resblock->act1_alpha) {
                         // Input is in upsample_in, output to upsample_out
                         resblock_forward(upsample_out, upsample_in, resblock,
-                                        rb_act_buf, rb_conv_buf, out_len, out_ch);
+                                        rb_act_buf, rb_conv_buf, out_len, out_ch,
+                                        dilations[rb]);
                         // Copy back to upsample_in for next iteration
                         memcpy(upsample_in, upsample_out, out_len * out_ch * sizeof(float));
                     }
@@ -1239,13 +1550,20 @@ void vocoder_full_forward(
         audio_out[t] = sum;
     }
 
-    // Debug: check audio output range
+    // Debug: check audio output range (before clamping)
     float audio_min = audio_out[0], audio_max = audio_out[0];
     for (int64_t t = 0; t < current_len; t++) {
         if (audio_out[t] < audio_min) audio_min = audio_out[t];
         if (audio_out[t] > audio_max) audio_max = audio_out[t];
     }
-    printf("  vocoder: audio output range: [%.4f, %.4f]\n", audio_min, audio_max);
+    printf("  vocoder: audio output range (before clamp): [%.4f, %.4f]\n", audio_min, audio_max);
+
+    // Clamp output to [-1, 1] range (matches Python: wav.clamp(min=-1, max=1))
+    for (int64_t t = 0; t < current_len; t++) {
+        if (audio_out[t] > 1.0f) audio_out[t] = 1.0f;
+        if (audio_out[t] < -1.0f) audio_out[t] = -1.0f;
+    }
+    printf("  vocoder: audio output clamped to [-1, 1]\n");
     fflush(stdout);
 
     // Cleanup
