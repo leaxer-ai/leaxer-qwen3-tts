@@ -38,6 +38,13 @@ Text → Tokenizer → Qwen3 LLM → Code Predictor → Split RVQ → Vocoder �
 - **model/**: Transformer blocks, attention, FFN
 - **io/**: GGUF loading, tokenization, WAV output
 
+## Development
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for:
+- Audio testing workflow with validation scripts
+- Debugging tips and common issues
+- Architecture details
+
 ## Reference
 
 - [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) - Original Python implementation
