@@ -52,6 +52,13 @@ jobs:
           else
             curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
           fi
+          # Create symlinks for versioned libraries
+          cd lib
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            ln -sf libonnxruntime.*.dylib libonnxruntime.dylib
+          elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            ln -sf libonnxruntime.so.* libonnxruntime.so
+          fi
 
       - name: Configure CMake
         shell: bash

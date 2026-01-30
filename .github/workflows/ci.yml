@@ -32,7 +32,7 @@ jobs:
         id: cache-ort
         with:
           path: onnxruntime
-          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}
+          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v2
 
       - name: Download ONNX Runtime
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -46,6 +46,13 @@ jobs:
             mv onnxruntime-*/* .
           else
             curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
+          fi
+          # Create symlinks for versioned libraries
+          cd lib
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            ln -sf libonnxruntime.*.dylib libonnxruntime.dylib
+          elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            ln -sf libonnxruntime.so.* libonnxruntime.so
           fi
 
       - name: Cache CMake build
@@ -102,7 +109,7 @@ jobs:
         id: cache-ort
         with:
           path: onnxruntime
-          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}
+          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v2
 
       - name: Download ONNX Runtime
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -116,6 +123,13 @@ jobs:
             mv onnxruntime-*/* .
           else
             curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
+          fi
+          # Create symlinks for versioned libraries
+          cd lib
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            ln -sf libonnxruntime.*.dylib libonnxruntime.dylib
+          elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            ln -sf libonnxruntime.so.* libonnxruntime.so
           fi
 
       - name: Configure CMake
