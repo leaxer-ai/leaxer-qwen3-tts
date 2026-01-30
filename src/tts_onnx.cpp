@@ -245,35 +245,138 @@ std::vector<float> TTSEngine::synthesize_tokens(const std::vector<int64_t>& toke
 // Prompt Building
 // ===========================================================================
 
-std::vector<float> TTSEngine::build_prompt_embeddings(const std::vector<int64_t>& text_tokens) {
-    // Build the full prompt embedding sequence:
-    // [text_embeds] + [codec_bos_embed] + [codec_control_tokens]
+std::vector<float> TTSEngine::build_prompt_embeddings(const std::vector<int64_t>& input_ids) {
+    // Build the proper prompt following zukky's example:
+    // 1. Get TTS special embeddings (bos, eos, pad)
+    // 2. Build codec prefill sequence
+    // 3. Role embedding (first 3 tokens: <|im_start|>, assistant, <tts>)
+    // 4. CRITICAL: ADD text embeddings to codec embeddings (not concatenate!)
+    // 5. Build trailing_text_hidden for generation phase
     
-    // 1. Project text tokens to embeddings
-    std::vector<float> text_embeds = run_text_project(text_tokens);
-    size_t text_len = text_tokens.size();
+    constexpr int HIDDEN = onnx_config::HIDDEN_SIZE;
     
-    // 2. Get codec BOS embedding
-    std::vector<float> codec_bos_embed = run_codec_embed(onnx_config::CODEC_BOS);
+    // Helper lambda to slice a vector
+    auto slice = [](const std::vector<float>& v, size_t start, size_t end) {
+        return std::vector<float>(v.begin() + start, v.begin() + end);
+    };
     
-    // 3. Build full prompt: text + codec_bos + codec_nothink (for non-thinking mode)
-    std::vector<float> codec_nothink_embed = run_codec_embed(onnx_config::CODEC_NOTHINK);
+    // Helper lambda to add two vectors element-wise
+    auto add_vectors = [](const std::vector<float>& a, const std::vector<float>& b) {
+        std::vector<float> result(a.size());
+        for (size_t i = 0; i < a.size(); ++i) {
+            result[i] = a[i] + b[i];
+        }
+        return result;
+    };
     
-    // Concatenate: [text_embeds, codec_bos, codec_nothink]
-    size_t total_tokens = text_len + 2;  // text + codec_bos + codec_nothink
-    std::vector<float> prompt_embeds;
-    prompt_embeds.reserve(total_tokens * onnx_config::HIDDEN_SIZE);
+    // 1. Get TTS special token embeddings
+    std::vector<int64_t> tts_ids = {
+        onnx_config::TTS_BOS, 
+        onnx_config::TTS_EOS, 
+        onnx_config::TTS_PAD
+    };
+    std::vector<float> tts_embeds = run_text_project(tts_ids);  // [3 x 1024]
     
-    // Add text embeddings
-    prompt_embeds.insert(prompt_embeds.end(), text_embeds.begin(), text_embeds.end());
+    std::vector<float> tts_bos = slice(tts_embeds, 0, HIDDEN);
+    std::vector<float> tts_eos = slice(tts_embeds, HIDDEN, 2 * HIDDEN);
+    tts_pad_embed_ = slice(tts_embeds, 2 * HIDDEN, 3 * HIDDEN);
     
-    // Add codec BOS
-    prompt_embeds.insert(prompt_embeds.end(), codec_bos_embed.begin(), codec_bos_embed.end());
+    // 2. Build codec prefill sequence (no-think mode)
+    // [NOTHINK, THINK_BOS, THINK_EOS, PAD, BOS]
+    std::vector<int64_t> codec_prefill = {
+        onnx_config::CODEC_NOTHINK,
+        onnx_config::CODEC_THINK_BOS,
+        onnx_config::CODEC_THINK_EOS,
+        onnx_config::CODEC_PAD,
+        onnx_config::CODEC_BOS
+    };
+    std::vector<float> codec_embeds = run_codec_embed_batch(codec_prefill);  // [5 x 1024]
     
-    // Add codec NOTHINK (disable thinking mode)
-    prompt_embeds.insert(prompt_embeds.end(), codec_nothink_embed.begin(), codec_nothink_embed.end());
+    // 3. Role embedding (first 3 tokens of input_ids)
+    // These are: <|im_start|>, assistant, <tts>
+    std::vector<int64_t> role_ids(input_ids.begin(), input_ids.begin() + 3);
+    std::vector<float> role_embed = run_text_project(role_ids);  // [3 x 1024]
     
-    return prompt_embeds;
+    // 4. Build pad block to align with codec embeddings
+    // pad_count = codec_len - 2 = 5 - 2 = 3
+    int pad_count = 3;
+    std::vector<float> pad_block;
+    pad_block.reserve(pad_count * HIDDEN);
+    for (int i = 0; i < pad_count; ++i) {
+        pad_block.insert(pad_block.end(), tts_pad_embed_.begin(), tts_pad_embed_.end());
+    }
+    
+    // 5. Combine pad_block + tts_bos
+    // text_part = [pad, pad, pad, tts_bos] = [4 x 1024]
+    std::vector<float> text_part;
+    text_part.reserve((pad_count + 1) * HIDDEN);
+    text_part.insert(text_part.end(), pad_block.begin(), pad_block.end());
+    text_part.insert(text_part.end(), tts_bos.begin(), tts_bos.end());
+    
+    // 6. CRITICAL: ADD text_part to codec embeddings (first 4 positions)
+    // codec_partial = codec_embeds[0:4] = [NOTHINK, THINK_BOS, THINK_EOS, PAD]
+    std::vector<float> codec_partial = slice(codec_embeds, 0, 4 * HIDDEN);
+    std::vector<float> talker_embed = add_vectors(text_part, codec_partial);
+    
+    // 7. First text token + last codec embedding (BOS)
+    // text content is from position 3 to end-5 (skip role and end tokens)
+    // input_ids format: [<|im_start|>, assistant, <tts>, \n, text..., <|tts_eos|>, <|im_end|>]
+    // But we don't have the \n and <|im_end|> as separate tokens in all cases
+    // Let's find the text content: skip first 3 (role), take until we hit special tokens at end
+    
+    size_t text_start = 3;  // After role tokens
+    size_t text_end = input_ids.size();  // Will adjust based on end tokens
+    
+    // The last 2 tokens should be <|tts_eos|> and <|im_end|>, but they might be merged
+    // For safety, we'll look for TTS_EOS in the token sequence
+    for (size_t i = input_ids.size(); i > text_start; --i) {
+        if (input_ids[i-1] == onnx_config::TTS_EOS) {
+            text_end = i - 1;  // Exclude TTS_EOS and anything after
+            break;
+        }
+    }
+    
+    // First text token embedding
+    std::vector<int64_t> first_text_id = {input_ids[text_start]};
+    std::vector<float> first_text_embed = run_text_project(first_text_id);
+    
+    // Last codec embedding (BOS position)
+    std::vector<float> last_codec = slice(codec_embeds, 4 * HIDDEN, 5 * HIDDEN);
+    
+    // ADD first text with last codec
+    std::vector<float> text_first_combined = add_vectors(first_text_embed, last_codec);
+    
+    // 8. Build full prompt
+    std::vector<float> prompt;
+    prompt.reserve((3 + 4 + 1) * HIDDEN);  // role(3) + talker(4) + first_text(1)
+    prompt.insert(prompt.end(), role_embed.begin(), role_embed.end());
+    prompt.insert(prompt.end(), talker_embed.begin(), talker_embed.end());
+    prompt.insert(prompt.end(), text_first_combined.begin(), text_first_combined.end());
+    
+    // 9. Build trailing_text_hidden (remaining text tokens + tts_eos)
+    // This is what gets ADDED during generation, one embedding per step
+    trailing_text_hidden_.clear();
+    
+    // Remaining text tokens (from position text_start+1 to text_end)
+    for (size_t i = text_start + 1; i < text_end; ++i) {
+        std::vector<int64_t> token_id = {input_ids[i]};
+        std::vector<float> embed = run_text_project(token_id);
+        trailing_text_hidden_.insert(trailing_text_hidden_.end(), embed.begin(), embed.end());
+    }
+    
+    // Add tts_eos at the end
+    trailing_text_hidden_.insert(trailing_text_hidden_.end(), tts_eos.begin(), tts_eos.end());
+    
+    trailing_len_ = static_cast<int>(trailing_text_hidden_.size() / HIDDEN);
+    
+    std::cout << "[TTSEngine] Prompt structure:" << std::endl;
+    std::cout << "  - Role tokens: 3" << std::endl;
+    std::cout << "  - Talker embed: 4 (pad+bos added to codec prefill)" << std::endl;
+    std::cout << "  - First text: 1" << std::endl;
+    std::cout << "  - Trailing text hidden: " << trailing_len_ << " steps" << std::endl;
+    std::cout << "  - Total prompt length: " << (prompt.size() / HIDDEN) << std::endl;
+    
+    return prompt;
 }
 
 // ===========================================================================
@@ -635,10 +738,11 @@ std::vector<std::array<int64_t, 16>> TTSEngine::generate_codes(
     const std::vector<float>& prompt_embeds,
     const SamplingParams& params) {
     
+    constexpr int HIDDEN = onnx_config::HIDDEN_SIZE;
     std::vector<std::array<int64_t, 16>> all_codes;
     
     // Build attention mask (all ones for prompt)
-    size_t prompt_len = prompt_embeds.size() / onnx_config::HIDDEN_SIZE;
+    size_t prompt_len = prompt_embeds.size() / HIDDEN;
     std::vector<int64_t> attention_mask(prompt_len, 1);
     
     // Phase 1: Prefill - process entire prompt
@@ -650,6 +754,8 @@ std::vector<std::array<int64_t, 16>> TTSEngine::generate_codes(
     std::vector<float> last_logits(
         logits.begin() + last_pos,
         logits.begin() + last_pos + onnx_config::VOCAB_SIZE);
+    
+    std::cout << "[Generate] Starting autoregressive loop (trailing_len=" << trailing_len_ << ")..." << std::endl;
     
     // Phase 2: Autoregressive generation loop
     for (int step = 0; step < params.max_new_tokens; ++step) {
@@ -686,6 +792,20 @@ std::vector<std::array<int64_t, 16>> TTSEngine::generate_codes(
             // Add to codec_embed
             for (size_t j = 0; j < codec_embed.size(); ++j) {
                 codec_embed[j] += sub_embed[j];
+            }
+        }
+        
+        // CRITICAL: Add trailing_text_hidden at each step!
+        // This is what makes the model "see" the remaining text during generation
+        if (step < trailing_len_) {
+            size_t offset = step * HIDDEN;
+            for (size_t j = 0; j < HIDDEN; ++j) {
+                codec_embed[j] += trailing_text_hidden_[offset + j];
+            }
+        } else {
+            // After trailing text is exhausted, add tts_pad_embed
+            for (size_t j = 0; j < HIDDEN; ++j) {
+                codec_embed[j] += tts_pad_embed_[j];
             }
         }
         
