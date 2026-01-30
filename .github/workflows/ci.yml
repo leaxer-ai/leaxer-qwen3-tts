@@ -56,11 +56,14 @@ jobs:
             rm ort.tgz
           fi
           # Move contents from extracted directory
-          EXTRACTED_DIR=$(ls -d onnxruntime-* 2>/dev/null | head -1)
+          ls -la
+          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "onnxruntime-*" | head -1)
+          echo "EXTRACTED_DIR=$EXTRACTED_DIR"
           if [[ -n "$EXTRACTED_DIR" && -d "$EXTRACTED_DIR" ]]; then
-            mv "$EXTRACTED_DIR"/* .
-            rmdir "$EXTRACTED_DIR"
+            cp -r "$EXTRACTED_DIR"/* .
+            rm -rf "$EXTRACTED_DIR"
           fi
+          ls -la lib/
           # Create symlink for versioned library (not needed on Windows)
           if [[ -n "${{ matrix.ort_link }}" ]]; then
             ln -sf "${{ matrix.ort_lib }}" "lib/${{ matrix.ort_link }}"
