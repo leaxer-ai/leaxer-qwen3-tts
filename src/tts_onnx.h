@@ -1,5 +1,11 @@
 // ONNX-based TTS Engine for Qwen3-TTS
 // Minimal, clean implementation with control features
+//
+// GPU Acceleration:
+//   - On Apple Silicon (M1/M2/M3), CoreML Execution Provider can be enabled
+//     for GPU/Neural Engine acceleration. Build with -DLEAXER_COREML=ON (default on ARM Macs)
+//   - Requires onnxruntime built with CoreML support
+//   - Falls back gracefully to CPU if CoreML EP is not available
 
 #ifndef LEAXER_QWEN_TTS_ONNX_H
 #define LEAXER_QWEN_TTS_ONNX_H
@@ -229,6 +235,15 @@ inline int64_t language_to_codec_id(Language lang) {
         case Language::Korean:   return config::LANG_KOREAN;
         default:                 return 0;  // Auto = no language token
     }
+}
+
+// Check if CoreML support was compiled in
+inline bool is_coreml_enabled() {
+#if defined(LEAXER_USE_COREML) && defined(__APPLE__)
+    return true;
+#else
+    return false;
+#endif
 }
 
 } // namespace leaxer_qwen

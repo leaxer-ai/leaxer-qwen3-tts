@@ -9,6 +9,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(LEAXER_QWEN_BUILD_TESTS "Build tests" ON)
 option(LEAXER_QWEN_STATIC "Build static library" ON)
 
+# CoreML acceleration (Apple Silicon only)
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
+    option(LEAXER_COREML "Enable CoreML Execution Provider for GPU acceleration" ON)
+else()
+    option(LEAXER_COREML "Enable CoreML Execution Provider for GPU acceleration" OFF)
+endif()
+
 # =============================================================================
 # ONNX Runtime (required for this branch)
 # =============================================================================
@@ -119,15 +126,28 @@ endif()
 
 target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_ONNX=1)
 
+# CoreML support
+if(LEAXER_COREML AND APPLE)
+    target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_COREML=1)
+    # Link CoreML and Foundation frameworks
+    target_link_libraries(leaxer_qwen_lib PUBLIC
+        "-framework CoreML"
+        "-framework Foundation"
+    )
+    message(STATUS "CoreML Execution Provider: ENABLED")
+else()
+    message(STATUS "CoreML Execution Provider: DISABLED")
+endif()
+
 # =============================================================================
 # Main executable (ONNX-based)
 # =============================================================================
 
-add_executable(leaxer-qwen3-tts-onnx src/main_onnx.cpp)
-target_link_libraries(leaxer-qwen3-tts-onnx PRIVATE leaxer_qwen_lib)
+add_executable(leaxer-qwen3-tts src/main_onnx.cpp)
+target_link_libraries(leaxer-qwen3-tts PRIVATE leaxer_qwen_lib)
 
 # Version info
-target_compile_definitions(leaxer-qwen3-tts-onnx PRIVATE
+target_compile_definitions(leaxer-qwen3-tts PRIVATE
     LEAXER_QWEN_VERSION="${PROJECT_VERSION}"
 )
 
@@ -168,7 +188,7 @@ endif()
 # Install
 # =============================================================================
 
-install(TARGETS leaxer-qwen3-tts-onnx DESTINATION bin)
+install(TARGETS leaxer-qwen3-tts DESTINATION bin)
 install(TARGETS leaxer_qwen_lib DESTINATION lib)
 
 # =============================================================================
@@ -179,4 +199,5 @@ message(STATUS "")
 message(STATUS "leaxer-qwen3-tts v${PROJECT_VERSION} (ONNX)")
 message(STATUS "  Build tests:  ${LEAXER_QWEN_BUILD_TESTS}")
 message(STATUS "  ONNX Runtime: ${ONNXRUNTIME_PREFIX}")
+message(STATUS "  CoreML EP:    ${LEAXER_COREML}")
 message(STATUS "")

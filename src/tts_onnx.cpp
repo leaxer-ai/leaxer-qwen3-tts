@@ -13,6 +13,14 @@
 #include <numeric>
 #include <iostream>
 #include <filesystem>
+#include <unordered_map>
+
+// CoreML EP support (Apple Silicon)
+#if defined(LEAXER_USE_COREML) && defined(__APPLE__)
+    #define LEAXER_TRY_COREML 1
+#else
+    #define LEAXER_TRY_COREML 0
+#endif
 
 namespace leaxer_qwen {
 
@@ -110,6 +118,37 @@ std::unique_ptr<Ort::Session> TTSEngine::load_model(const std::string& filename)
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(4);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        
+#if LEAXER_TRY_COREML
+        // Try to add CoreML Execution Provider for GPU acceleration on Apple Silicon
+        // This will use the new API which is cleaner and more future-proof
+        try {
+            std::unordered_map<std::string, std::string> coreml_options;
+            // Use MLProgram format for better performance (requires macOS 12+)
+            coreml_options["ModelFormat"] = "MLProgram";
+            // Use all available compute units (CPU + GPU + Neural Engine)
+            coreml_options["MLComputeUnits"] = "ALL";
+            // Allow dynamic shapes (our models may have variable sequence lengths)
+            coreml_options["RequireStaticInputShapes"] = "0";
+            
+            opts.AppendExecutionProvider("CoreML", coreml_options);
+            
+            // Log success only once (first model load)
+            static bool logged_coreml = false;
+            if (!logged_coreml) {
+                std::cerr << "[TTSEngine] CoreML Execution Provider enabled (GPU/ANE acceleration)" << std::endl;
+                logged_coreml = true;
+            }
+        } catch (const Ort::Exception& e) {
+            // CoreML EP not available in this onnxruntime build, fall back to CPU
+            static bool logged_fallback = false;
+            if (!logged_fallback) {
+                std::cerr << "[TTSEngine] CoreML EP not available, using CPU: " << e.what() << std::endl;
+                logged_fallback = true;
+            }
+        }
+#endif
+        
         return std::make_unique<Ort::Session>(*env_, model_path.c_str(), opts);
     } catch (...) {
         return nullptr;

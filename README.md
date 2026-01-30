@@ -43,7 +43,7 @@ cd leaxer-qwen3-tts
 cmake -B build
 cmake --build build -j
 
-./build/leaxer-qwen3-tts-onnx --help
+./build/leaxer-qwen3-tts --help
 ```
 
 ### Linux
@@ -65,7 +65,7 @@ git lfs install
 git clone https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL models
 
 # Use the 0.6B model
-./build/leaxer-qwen3-tts-onnx -m onnx/onnx_kv_06b -p "Hello"
+./build/leaxer-qwen3-tts -m onnx/onnx_kv_06b -p "Hello"
 ```
 
 ### Required files in model directory:

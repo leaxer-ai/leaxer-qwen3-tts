@@ -21,19 +21,19 @@ jobs:
             ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz
             ort_lib: libonnxruntime.so.1.20.0
             ort_link: libonnxruntime.so
-            binary: leaxer-qwen3-tts-onnx
+            binary: leaxer-qwen3-tts
           - os: macos-latest
             artifact: macos-arm64
             ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-osx-arm64-1.20.0.tgz
             ort_lib: libonnxruntime.1.20.0.dylib
             ort_link: libonnxruntime.dylib
-            binary: leaxer-qwen3-tts-onnx
+            binary: leaxer-qwen3-tts
           - os: windows-2022
             artifact: windows-x64
             ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-win-x64-1.20.0.zip
             ort_lib: onnxruntime.dll
             ort_link: ""
-            binary: leaxer-qwen3-tts-onnx.exe
+            binary: leaxer-qwen3-tts.exe
 
     runs-on: ${{ matrix.os }}
 
