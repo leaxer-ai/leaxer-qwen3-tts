@@ -2,6 +2,7 @@
 // Implements the generation loop using ONNX Runtime
 
 #include "tts_onnx.h"
+#include "io/tokenizer.h"
 
 // ONNX Runtime headers
 #include <onnxruntime/onnxruntime_cxx_api.h>
@@ -87,6 +88,28 @@ TTSEngine::TTSEngine(const std::string& model_dir) : model_dir_(model_dir) {
             std::cout << "[TTSEngine] Loaded speaker_encoder.onnx (optional)" << std::endl;
         }
         
+        // Load tokenizer (vocab.json and merges.txt)
+        // They're in ../models/Qwen3-TTS-12Hz-0.6B-Base/ relative to model_dir
+        fs::path model_base = fs::path(model_dir_).parent_path() / "models" / "Qwen3-TTS-12Hz-0.6B-Base";
+        fs::path vocab_path = model_base / "vocab.json";
+        fs::path merges_path = model_base / "merges.txt";
+        
+        if (fs::exists(vocab_path) && fs::exists(merges_path)) {
+            std::cout << "[TTSEngine] Loading tokenizer from: " << model_base << std::endl;
+            if (!io::load_vocab(vocab_path.string())) {
+                error_msg_ = "Failed to load vocab.json";
+                return;
+            }
+            if (!io::load_merges(merges_path.string())) {
+                error_msg_ = "Failed to load merges.txt";
+                return;
+            }
+            std::cout << "[TTSEngine] Tokenizer loaded successfully!" << std::endl;
+        } else {
+            std::cerr << "[TTSEngine] Warning: Tokenizer files not found at " << model_base << std::endl;
+            std::cerr << "[TTSEngine] Will use placeholder tokenization (results may be poor)" << std::endl;
+        }
+        
         ready_ = true;
         std::cout << "[TTSEngine] All models loaded successfully!" << std::endl;
         
@@ -132,23 +155,35 @@ std::vector<float> TTSEngine::synthesize(const std::string& text,
         return {};
     }
     
-    // TODO: Implement proper BPE tokenization
-    // For now, this is a placeholder - actual implementation needs tokenizer
-    std::cerr << "[TTSEngine] Warning: Using placeholder tokenization" << std::endl;
-    std::cerr << "[TTSEngine] Text: " << text << std::endl;
+    std::cout << "[TTSEngine] Text: " << text << std::endl;
     
-    // Placeholder: convert text to dummy token IDs
-    // Real implementation needs BPE tokenizer with vocab.json and merges.txt
     std::vector<int64_t> token_ids;
     
-    // Add TTS special tokens
+    // Add TTS BOS token
     token_ids.push_back(onnx_config::TTS_BOS);
     
-    // Placeholder text tokens (should be BPE encoded)
-    for (char c : text) {
-        token_ids.push_back(static_cast<int64_t>(c) + 1000);  // Dummy mapping
+    // Tokenize text using BPE tokenizer
+    if (io::is_tokenizer_ready()) {
+        std::vector<int32_t> text_tokens = io::tokenize(text);
+        std::cout << "[TTSEngine] Tokenized to " << text_tokens.size() << " tokens: ";
+        for (size_t i = 0; i < std::min(text_tokens.size(), size_t(10)); i++) {
+            std::cout << text_tokens[i] << " ";
+        }
+        if (text_tokens.size() > 10) std::cout << "...";
+        std::cout << std::endl;
+        
+        for (int32_t t : text_tokens) {
+            token_ids.push_back(static_cast<int64_t>(t));
+        }
+    } else {
+        // Fallback: placeholder tokenization (for testing only)
+        std::cerr << "[TTSEngine] Warning: Using placeholder tokenization" << std::endl;
+        for (char c : text) {
+            token_ids.push_back(static_cast<int64_t>(c) + 1000);
+        }
     }
     
+    // Add TTS EOS token
     token_ids.push_back(onnx_config::TTS_EOS);
     
     return synthesize_tokens(token_ids, params);
