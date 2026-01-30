@@ -75,6 +75,7 @@ constexpr int CODEBOOK_VOCAB = 2048;
 
 // Code predictor transformer layer
 // Same architecture as main transformer but for code refinement
+// Now includes Q/K normalization and RoPE (Qwen3 architecture)
 struct ggml_tensor * code_pred_transformer_layer(
     struct ggml_context * ctx,
     struct ggml_tensor * x,
@@ -83,10 +84,13 @@ struct ggml_tensor * code_pred_transformer_layer(
     struct ggml_tensor * k_weight,
     struct ggml_tensor * v_weight,
     struct ggml_tensor * o_weight,
+    struct ggml_tensor * q_norm_weight,       // Q normalization (Qwen3)
+    struct ggml_tensor * k_norm_weight,       // K normalization (Qwen3)
     struct ggml_tensor * ffn_norm_weight,
     struct ggml_tensor * ffn_w1,
     struct ggml_tensor * ffn_w2,
-    struct ggml_tensor * ffn_w3) {
+    struct ggml_tensor * ffn_w3,
+    int start_pos = 0) {                      // Start position for RoPE
 
     // Pre-normalization for attention
     struct ggml_tensor * normed = ops::rms_norm(ctx, x, attn_norm_weight, 1e-6f);
@@ -114,6 +118,32 @@ struct ggml_tensor * code_pred_transformer_layer(
     V = ggml_reshape_4d(ctx, V, head_dim, num_kv_heads, seq_len, 1);
     V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
     V = ggml_reshape_3d(ctx, V, head_dim, seq_len, num_kv_heads);
+
+    // Apply Q/K normalization (Qwen3-specific) BEFORE RoPE
+    if (q_norm_weight != nullptr) {
+        Q = ops::rms_norm(ctx, Q, q_norm_weight, 1e-6f);
+    }
+    if (k_norm_weight != nullptr) {
+        K = ops::rms_norm(ctx, K, k_norm_weight, 1e-6f);
+    }
+
+    // Apply RoPE (Rotary Position Embeddings) AFTER Q/K norm
+    {
+        struct ggml_tensor * pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq_len);
+        int32_t * pos_data = (int32_t *)pos->data;
+        for (int i = 0; i < seq_len; i++) {
+            pos_data[i] = start_pos + i;
+        }
+
+        // Apply RoPE to Q and K
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
+        Q = ggml_rope(ctx, Q, pos, head_dim, 0);
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
+
+        K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+        K = ggml_rope(ctx, K, pos, head_dim, 0);
+        K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+    }
 
     // GQA: expand K and V to match Q's head count (8 KV heads -> 16 Q heads)
     if (num_kv_heads < num_heads) {
@@ -209,10 +239,13 @@ static bool run_transformer_layer(
     struct ggml_tensor * k_weight,
     struct ggml_tensor * v_weight,
     struct ggml_tensor * o_weight,
+    struct ggml_tensor * q_norm,       // Q normalization (Qwen3)
+    struct ggml_tensor * k_norm,       // K normalization (Qwen3)
     struct ggml_tensor * ffn_norm,
     struct ggml_tensor * ffn_w1,
     struct ggml_tensor * ffn_w2,
-    struct ggml_tensor * ffn_w3) {
+    struct ggml_tensor * ffn_w3,
+    int start_pos = 0) {               // Start position for RoPE
 
     // Calculate memory needed for single layer
     // For short sequences (code predictor uses seq_len=2..17), this is manageable
@@ -233,11 +266,13 @@ static bool run_transformer_layer(
     struct ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden_dim, seq_len);
     memcpy(x->data, hidden_in, seq_len * hidden_dim * sizeof(float));
 
-    // Run transformer layer
+    // Run transformer layer (now with Q/K norms and RoPE)
     struct ggml_tensor * out = code_pred_transformer_layer(
         ctx, x,
         attn_norm, q_weight, k_weight, v_weight, o_weight,
-        ffn_norm, ffn_w1, ffn_w2, ffn_w3
+        q_norm, k_norm,  // Q/K normalization (Qwen3)
+        ffn_norm, ffn_w1, ffn_w2, ffn_w3,
+        start_pos        // Position for RoPE
     );
 
     // Build and execute graph
@@ -264,6 +299,8 @@ static bool run_transformer_layer(
 // Run all 5 transformer layers on the input
 // Input shape: [seq_len, hidden_dim]
 // Output shape: [seq_len, hidden_dim]
+// Layer weights layout (11 per layer):
+//   0: attn_norm, 1: q, 2: k, 3: v, 4: o, 5: q_norm, 6: k_norm, 7: ffn_norm, 8: gate, 9: up, 10: down
 static bool run_transformer_stack(
     float * output,
     const float * input,
@@ -283,9 +320,9 @@ static bool run_transformer_stack(
     // Copy input to hidden
     memcpy(hidden, input, seq_len * hidden_dim * sizeof(float));
     
-    // Run through 5 layers
+    // Run through 5 layers (using 11 weights per layer for Qwen3 architecture)
     for (int layer = 0; layer < CODE_PRED_LAYERS; layer++) {
-        int base = layer * 9;
+        int base = layer * 11;  // Changed from 9 to 11
         bool ok = run_transformer_layer(
             hidden_tmp, hidden, seq_len, hidden_dim,
             layer_weights[base + 0],  // attn_norm
@@ -293,10 +330,13 @@ static bool run_transformer_stack(
             layer_weights[base + 2],  // k_weight
             layer_weights[base + 3],  // v_weight
             layer_weights[base + 4],  // o_weight
-            layer_weights[base + 5],  // ffn_norm
-            layer_weights[base + 6],  // ffn_w1 (gate)
-            layer_weights[base + 7],  // ffn_w2 (up)
-            layer_weights[base + 8]   // ffn_w3 (down)
+            layer_weights[base + 5],  // q_norm (Qwen3)
+            layer_weights[base + 6],  // k_norm (Qwen3)
+            layer_weights[base + 7],  // ffn_norm
+            layer_weights[base + 8],  // ffn_w1 (gate)
+            layer_weights[base + 9],  // ffn_w2 (up)
+            layer_weights[base + 10], // ffn_w3 (down)
+            0                         // start_pos for RoPE (code predictor resets per frame)
         );
 
         if (!ok) {

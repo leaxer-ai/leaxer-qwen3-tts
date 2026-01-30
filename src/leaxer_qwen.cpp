@@ -504,8 +504,9 @@ float * leaxer_qwen_generate(
     }
 
     // Prepare layer weights array for tts_generate
-    // Each layer needs 9 weight tensors
-    struct ggml_tensor ** layer_weights = (struct ggml_tensor **)malloc(28 * 9 * sizeof(struct ggml_tensor *));
+    // Each layer needs 11 weight tensors (now includes Q/K normalization)
+    // Layout: attn_norm, q, k, v, o, q_norm, k_norm, ffn_norm, gate, up, down
+    struct ggml_tensor ** layer_weights = (struct ggml_tensor **)malloc(28 * 11 * sizeof(struct ggml_tensor *));
     if (!layer_weights) {
         fprintf(stderr, "Error: failed to allocate layer weights array\n");
         *n_samples = 0;
@@ -513,19 +514,21 @@ float * leaxer_qwen_generate(
     }
 
     for (int i = 0; i < 28; i++) {
-        layer_weights[i * 9 + 0] = ctx->model->talker.layers[i].in_ln_weight;
-        layer_weights[i * 9 + 1] = ctx->model->talker.layers[i].attn_q_proj_weight;
-        layer_weights[i * 9 + 2] = ctx->model->talker.layers[i].attn_k_proj_weight;
-        layer_weights[i * 9 + 3] = ctx->model->talker.layers[i].attn_v_proj_weight;
-        layer_weights[i * 9 + 4] = ctx->model->talker.layers[i].attn_o_proj_weight;
-        layer_weights[i * 9 + 5] = ctx->model->talker.layers[i].post_ln_weight;
-        layer_weights[i * 9 + 6] = ctx->model->talker.layers[i].ffn_gate_proj_weight;
-        layer_weights[i * 9 + 7] = ctx->model->talker.layers[i].ffn_up_proj_weight;
-        layer_weights[i * 9 + 8] = ctx->model->talker.layers[i].ffn_down_proj_weight;
+        layer_weights[i * 11 + 0] = ctx->model->talker.layers[i].in_ln_weight;
+        layer_weights[i * 11 + 1] = ctx->model->talker.layers[i].attn_q_proj_weight;
+        layer_weights[i * 11 + 2] = ctx->model->talker.layers[i].attn_k_proj_weight;
+        layer_weights[i * 11 + 3] = ctx->model->talker.layers[i].attn_v_proj_weight;
+        layer_weights[i * 11 + 4] = ctx->model->talker.layers[i].attn_o_proj_weight;
+        layer_weights[i * 11 + 5] = ctx->model->talker.layers[i].attn_q_norm_weight;  // Q norm (Qwen3)
+        layer_weights[i * 11 + 6] = ctx->model->talker.layers[i].attn_k_norm_weight;  // K norm (Qwen3)
+        layer_weights[i * 11 + 7] = ctx->model->talker.layers[i].post_ln_weight;
+        layer_weights[i * 11 + 8] = ctx->model->talker.layers[i].ffn_gate_proj_weight;
+        layer_weights[i * 11 + 9] = ctx->model->talker.layers[i].ffn_up_proj_weight;
+        layer_weights[i * 11 + 10] = ctx->model->talker.layers[i].ffn_down_proj_weight;
     }
 
-    // Prepare code predictor layer weights
-    struct ggml_tensor ** code_pred_layer_weights = (struct ggml_tensor **)malloc(5 * 9 * sizeof(struct ggml_tensor *));
+    // Prepare code predictor layer weights (also 11 per layer with Q/K norms)
+    struct ggml_tensor ** code_pred_layer_weights = (struct ggml_tensor **)malloc(5 * 11 * sizeof(struct ggml_tensor *));
     if (!code_pred_layer_weights) {
         fprintf(stderr, "Error: failed to allocate code predictor layer weights array\n");
         free(layer_weights);
@@ -534,15 +537,17 @@ float * leaxer_qwen_generate(
     }
 
     for (int i = 0; i < 5; i++) {
-        code_pred_layer_weights[i * 9 + 0] = ctx->model->code_predictor.layers[i].in_ln_weight;
-        code_pred_layer_weights[i * 9 + 1] = ctx->model->code_predictor.layers[i].attn_q_proj_weight;
-        code_pred_layer_weights[i * 9 + 2] = ctx->model->code_predictor.layers[i].attn_k_proj_weight;
-        code_pred_layer_weights[i * 9 + 3] = ctx->model->code_predictor.layers[i].attn_v_proj_weight;
-        code_pred_layer_weights[i * 9 + 4] = ctx->model->code_predictor.layers[i].attn_o_proj_weight;
-        code_pred_layer_weights[i * 9 + 5] = ctx->model->code_predictor.layers[i].post_ln_weight;
-        code_pred_layer_weights[i * 9 + 6] = ctx->model->code_predictor.layers[i].ffn_gate_proj_weight;
-        code_pred_layer_weights[i * 9 + 7] = ctx->model->code_predictor.layers[i].ffn_up_proj_weight;
-        code_pred_layer_weights[i * 9 + 8] = ctx->model->code_predictor.layers[i].ffn_down_proj_weight;
+        code_pred_layer_weights[i * 11 + 0] = ctx->model->code_predictor.layers[i].in_ln_weight;
+        code_pred_layer_weights[i * 11 + 1] = ctx->model->code_predictor.layers[i].attn_q_proj_weight;
+        code_pred_layer_weights[i * 11 + 2] = ctx->model->code_predictor.layers[i].attn_k_proj_weight;
+        code_pred_layer_weights[i * 11 + 3] = ctx->model->code_predictor.layers[i].attn_v_proj_weight;
+        code_pred_layer_weights[i * 11 + 4] = ctx->model->code_predictor.layers[i].attn_o_proj_weight;
+        code_pred_layer_weights[i * 11 + 5] = ctx->model->code_predictor.layers[i].attn_q_norm_weight;  // Q norm
+        code_pred_layer_weights[i * 11 + 6] = ctx->model->code_predictor.layers[i].attn_k_norm_weight;  // K norm
+        code_pred_layer_weights[i * 11 + 7] = ctx->model->code_predictor.layers[i].post_ln_weight;
+        code_pred_layer_weights[i * 11 + 8] = ctx->model->code_predictor.layers[i].ffn_gate_proj_weight;
+        code_pred_layer_weights[i * 11 + 9] = ctx->model->code_predictor.layers[i].ffn_up_proj_weight;
+        code_pred_layer_weights[i * 11 + 10] = ctx->model->code_predictor.layers[i].ffn_down_proj_weight;
     }
 
     // Check if vocoder is loaded

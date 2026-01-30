@@ -158,17 +158,19 @@ struct ggml_tensor * talker_forward(
     // Each block applies RoPE for position encoding
     struct ggml_tensor * hidden = proj;
     for (int i = 0; i < n_layers; i++) {
-        // Each layer expects 9 weight tensors in order:
+        // Each layer expects 11 weight tensors in order:
         // 0: attn_norm_weight
         // 1: q_weight
         // 2: k_weight
         // 3: v_weight
         // 4: o_weight
-        // 5: ffn_norm_weight
-        // 6: ffn_gate (w1)
-        // 7: ffn_up (w2)
-        // 8: ffn_down (w3)
-        struct ggml_tensor ** layer_w = &layer_weights[i * 9];
+        // 5: q_norm_weight (Qwen3)
+        // 6: k_norm_weight (Qwen3)
+        // 7: ffn_norm_weight
+        // 8: ffn_gate (w1)
+        // 9: ffn_up (w2)
+        // 10: ffn_down (w3)
+        struct ggml_tensor ** layer_w = &layer_weights[i * 11];
 
         hidden = transformer_block(
             ctx,
@@ -178,12 +180,12 @@ struct ggml_tensor * talker_forward(
             layer_w[2],  // k_weight
             layer_w[3],  // v_weight
             layer_w[4],  // o_weight
-            nullptr,     // q_norm_weight (TODO: add to layer_weights)
-            nullptr,     // k_norm_weight (TODO: add to layer_weights)
-            layer_w[5],  // ffn_norm_weight
-            layer_w[6],  // ffn_w1
-            layer_w[7],  // ffn_w2
-            layer_w[8]   // ffn_w3
+            layer_w[5],  // q_norm_weight (Qwen3)
+            layer_w[6],  // k_norm_weight (Qwen3)
+            layer_w[7],  // ffn_norm_weight
+            layer_w[8],  // ffn_w1
+            layer_w[9],  // ffn_w2
+            layer_w[10]  // ffn_w3
         );
     }
 
@@ -593,6 +595,8 @@ struct ggml_tensor * transformer_block_cached(
     struct ggml_tensor * k_weight,
     struct ggml_tensor * v_weight,
     struct ggml_tensor * o_weight,
+    struct ggml_tensor * q_norm_weight,      // Q normalization (Qwen3)
+    struct ggml_tensor * k_norm_weight,      // K normalization (Qwen3)
     struct ggml_tensor * ffn_norm_weight,
     struct ggml_tensor * ffn_w1,
     struct ggml_tensor * ffn_w2,
@@ -634,7 +638,7 @@ static struct ggml_tensor * talker_forward_from_embeds(
     // Pass through transformer blocks with caching
     struct ggml_tensor * hidden = combined_embeds;
     for (int i = 0; i < n_layers; i++) {
-        struct ggml_tensor ** layer_w = &layer_weights[i * 9];
+        struct ggml_tensor ** layer_w = &layer_weights[i * 11];
 
         hidden = transformer_block_cached(
             ctx,
@@ -644,10 +648,12 @@ static struct ggml_tensor * talker_forward_from_embeds(
             layer_w[2],  // k_weight
             layer_w[3],  // v_weight
             layer_w[4],  // o_weight
-            layer_w[5],  // ffn_norm_weight
-            layer_w[6],  // ffn_w1
-            layer_w[7],  // ffn_w2
-            layer_w[8],  // ffn_w3
+            layer_w[5],  // q_norm_weight (Qwen3)
+            layer_w[6],  // k_norm_weight (Qwen3)
+            layer_w[7],  // ffn_norm_weight
+            layer_w[8],  // ffn_w1
+            layer_w[9],  // ffn_w2
+            layer_w[10], // ffn_w3
             i,           // layer_idx
             kv_cache,
             start_pos
@@ -689,7 +695,7 @@ static struct ggml_tensor * talker_forward_from_embeds_with_hidden(
     // Pass through transformer blocks with caching
     struct ggml_tensor * hidden = combined_embeds;
     for (int i = 0; i < n_layers; i++) {
-        struct ggml_tensor ** layer_w = &layer_weights[i * 9];
+        struct ggml_tensor ** layer_w = &layer_weights[i * 11];
 
         hidden = transformer_block_cached(
             ctx,
@@ -699,10 +705,12 @@ static struct ggml_tensor * talker_forward_from_embeds_with_hidden(
             layer_w[2],  // k_weight
             layer_w[3],  // v_weight
             layer_w[4],  // o_weight
-            layer_w[5],  // ffn_norm_weight
-            layer_w[6],  // ffn_w1
-            layer_w[7],  // ffn_w2
-            layer_w[8],  // ffn_w3
+            layer_w[5],  // q_norm_weight (Qwen3)
+            layer_w[6],  // k_norm_weight (Qwen3)
+            layer_w[7],  // ffn_norm_weight
+            layer_w[8],  // ffn_w1
+            layer_w[9],  // ffn_w2
+            layer_w[10], // ffn_w3
             i,           // layer_idx
             kv_cache,
             start_pos
@@ -808,7 +816,7 @@ static struct ggml_tensor * talker_forward_cached(
     // Pass through transformer blocks with caching
     struct ggml_tensor * hidden = proj;
     for (int i = 0; i < n_layers; i++) {
-        struct ggml_tensor ** layer_w = &layer_weights[i * 9];
+        struct ggml_tensor ** layer_w = &layer_weights[i * 11];
 
         hidden = transformer_block_cached(
             ctx,
@@ -818,10 +826,12 @@ static struct ggml_tensor * talker_forward_cached(
             layer_w[2],  // k_weight
             layer_w[3],  // v_weight
             layer_w[4],  // o_weight
-            layer_w[5],  // ffn_norm_weight
-            layer_w[6],  // ffn_w1
-            layer_w[7],  // ffn_w2
-            layer_w[8],  // ffn_w3
+            layer_w[5],  // q_norm_weight (Qwen3)
+            layer_w[6],  // k_norm_weight (Qwen3)
+            layer_w[7],  // ffn_norm_weight
+            layer_w[8],  // ffn_w1
+            layer_w[9],  // ffn_w2
+            layer_w[10], // ffn_w3
             i,           // layer_idx
             kv_cache,
             start_pos

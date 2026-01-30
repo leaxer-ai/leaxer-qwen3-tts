@@ -109,6 +109,8 @@ static struct ggml_tensor * cached_attention(
 //   layer_idx: layer index for KV cache
 //   kv_cache: KV cache (can be nullptr for non-cached mode)
 //   start_pos: position of first token in x (0 for prefill, cache_len for decode)
+//   q_norm_weight: Q normalization weight (can be nullptr to skip)
+//   k_norm_weight: K normalization weight (can be nullptr to skip)
 struct ggml_tensor * transformer_block_cached(
     struct ggml_context * ctx,
     struct ggml_tensor * x,
@@ -117,6 +119,8 @@ struct ggml_tensor * transformer_block_cached(
     struct ggml_tensor * k_weight,
     struct ggml_tensor * v_weight,
     struct ggml_tensor * o_weight,
+    struct ggml_tensor * q_norm_weight,      // Q normalization (Qwen3-specific)
+    struct ggml_tensor * k_norm_weight,      // K normalization (Qwen3-specific)
     struct ggml_tensor * ffn_norm_weight,
     struct ggml_tensor * ffn_w1,
     struct ggml_tensor * ffn_w2,
@@ -152,6 +156,38 @@ struct ggml_tensor * transformer_block_cached(
     V_new = ggml_reshape_4d(ctx, V_new, head_dim, num_kv_heads, seq_len, 1);
     V_new = ggml_cont(ctx, ggml_permute(ctx, V_new, 0, 2, 1, 3));
     V_new = ggml_reshape_3d(ctx, V_new, head_dim, seq_len, num_kv_heads);
+
+    // Apply Q/K normalization (RMSNorm per head) - Qwen3 specific
+    // CRITICAL: Qwen3 applies QK normalization BEFORE RoPE
+    if (q_norm_weight != nullptr) {
+        Q = ops::rms_norm(ctx, Q, q_norm_weight, 1e-6f);
+    }
+    if (k_norm_weight != nullptr) {
+        K_new = ops::rms_norm(ctx, K_new, k_norm_weight, 1e-6f);
+    }
+
+    // Apply RoPE (Rotary Position Embeddings) to Q and K_new
+    // CRITICAL: RoPE must be applied AFTER Q/K norm and BEFORE caching K
+    // Position for each token: start_pos, start_pos+1, ..., start_pos+seq_len-1
+    {
+        // Create position tensor for this sequence segment
+        struct ggml_tensor * pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq_len);
+        int32_t * pos_data = (int32_t *)pos->data;
+        for (int i = 0; i < seq_len; i++) {
+            pos_data[i] = start_pos + i;
+        }
+
+        // Apply RoPE with freq_base=10000 (standard Qwen3 setting)
+        // Permute Q: [head_dim, seq_len, num_heads] -> [head_dim, num_heads, seq_len, 1] for ggml_rope
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
+        Q = ggml_rope(ctx, Q, pos, head_dim, 0);  // Apply RoPE to all head_dim dimensions
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));  // Back to [head_dim, seq_len, num_heads]
+
+        // Apply RoPE to K_new (before caching)
+        K_new = ggml_cont(ctx, ggml_permute(ctx, K_new, 0, 2, 1, 3));
+        K_new = ggml_rope(ctx, K_new, pos, head_dim, 0);
+        K_new = ggml_cont(ctx, ggml_permute(ctx, K_new, 0, 2, 1, 3));  // Back to [head_dim, seq_len, num_kv_heads]
+    }
 
     // Get full K, V (cached + new)
     struct ggml_tensor * K_full = K_new;

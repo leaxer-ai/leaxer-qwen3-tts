@@ -141,6 +141,35 @@ struct ggml_tensor * transformer_block(
         K = ops::rms_norm(ctx, K, k_norm_weight, 1e-6f);
     }
 
+    // Apply RoPE (Rotary Position Embeddings) to Q and K
+    // CRITICAL: Qwen3 applies RoPE AFTER Q/K normalization
+    // Position tensor needs to be created for the sequence
+    // For simplicity, we create positions 0, 1, 2, ..., seq_len-1
+    {
+        // Create position tensor [seq_len]
+        struct ggml_tensor * pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq_len);
+        int32_t * pos_data = (int32_t *)pos->data;
+        for (int i = 0; i < seq_len; i++) {
+            pos_data[i] = i;
+        }
+
+        // Apply RoPE with freq_base=10000 (standard Qwen3 setting)
+        // Q: [head_dim, seq_len, num_heads] -> apply RoPE to head_dim pairs
+        // K: [head_dim, seq_len, num_kv_heads] -> apply RoPE to head_dim pairs
+        // ggml_rope expects: [n_dims, n_ctx, n_heads, batch] and applies RoPE to first n_rot dims
+        // We permute to [head_dim, num_heads, seq_len, 1] for ggml_rope, then permute back
+
+        // Permute Q: [head_dim, seq_len, num_heads] -> [head_dim, num_heads, seq_len, 1]
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
+        Q = ggml_rope(ctx, Q, pos, head_dim, 0);  // Apply RoPE to all head_dim dimensions
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));  // Back to [head_dim, seq_len, num_heads]
+
+        // Permute K: [head_dim, seq_len, num_kv_heads] -> [head_dim, num_kv_heads, seq_len, 1]
+        K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+        K = ggml_rope(ctx, K, pos, head_dim, 0);  // Apply RoPE to all head_dim dimensions
+        K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));  // Back to [head_dim, seq_len, num_kv_heads]
+    }
+
     // GQA: Expand K and V heads to match Q heads
     // K/V have 8 heads, Q has 16 heads, so repeat K/V heads 2x
     // This is done by repeating along the heads dimension (dim 2)

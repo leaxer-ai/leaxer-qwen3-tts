@@ -1,0 +1,22 @@
+Audio Analysis Report
+========================================
+File: hi.wav
+Sample rate: 24000 Hz
+Duration: 7.20 seconds
+
+Metrics:
+  peak: 0.949951171875
+  rms: 0.15900872647762299
+  crest_factor: 5.974207782937398
+  zcr_per_second: 3092.361111111111
+  mean_spectral_centroid: 2790.8173186227014
+  std_spectral_centroid: 312.70041039927145
+  mean_spectral_flatness: 0.4678665698767392
+  envelope_std: 0.02984290011227131
+  envelope_mean: 0.1561831533908844
+  envelope_variation: 0.19107630653656307
+
+Speech-like: False
+
+Issues:
+  - LOW envelope variation (0.19) - constant amplitude like noise
