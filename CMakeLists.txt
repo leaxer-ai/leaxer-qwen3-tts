@@ -13,51 +13,57 @@ option(LEAXER_QWEN_STATIC "Build static library" ON)
 # ONNX Runtime (required for this branch)
 # =============================================================================
 
-# Try to find onnxruntime via pkg-config first
-find_package(PkgConfig QUIET)
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(ONNXRUNTIME QUIET libonnxruntime)
-endif()
-
-if(ONNXRUNTIME_FOUND)
-    message(STATUS "Found ONNX Runtime via pkg-config: ${ONNXRUNTIME_VERSION}")
+# Allow user to specify ONNX Runtime paths directly (for CI/bundling)
+if(ONNXRUNTIME_INCLUDE_DIRS AND ONNXRUNTIME_LIBRARY)
+    set(ONNXRUNTIME_FOUND TRUE)
+    message(STATUS "Using provided ONNX Runtime: ${ONNXRUNTIME_LIBRARY}")
 else()
-    # Try homebrew path (macOS)
-    if(APPLE)
-        execute_process(
-            COMMAND brew --prefix onnxruntime
-            OUTPUT_VARIABLE ONNXRUNTIME_PREFIX
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_QUIET
-        )
-        if(ONNXRUNTIME_PREFIX)
-            set(ONNXRUNTIME_INCLUDE_DIRS "${ONNXRUNTIME_PREFIX}/include")
-            set(ONNXRUNTIME_LIBRARY_DIRS "${ONNXRUNTIME_PREFIX}/lib")
-            find_library(ONNXRUNTIME_LIBRARY onnxruntime PATHS ${ONNXRUNTIME_LIBRARY_DIRS} NO_DEFAULT_PATH)
-            if(ONNXRUNTIME_LIBRARY)
+    # Try to find onnxruntime via pkg-config first
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(ONNXRUNTIME QUIET libonnxruntime)
+    endif()
+
+    if(ONNXRUNTIME_FOUND)
+        message(STATUS "Found ONNX Runtime via pkg-config: ${ONNXRUNTIME_VERSION}")
+    else()
+        # Try homebrew path (macOS)
+        if(APPLE)
+            execute_process(
+                COMMAND brew --prefix onnxruntime
+                OUTPUT_VARIABLE ONNXRUNTIME_PREFIX
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET
+            )
+            if(ONNXRUNTIME_PREFIX)
+                set(ONNXRUNTIME_INCLUDE_DIRS "${ONNXRUNTIME_PREFIX}/include")
+                set(ONNXRUNTIME_LIBRARY_DIRS "${ONNXRUNTIME_PREFIX}/lib")
+                find_library(ONNXRUNTIME_LIBRARY onnxruntime PATHS ${ONNXRUNTIME_LIBRARY_DIRS} NO_DEFAULT_PATH)
+                if(ONNXRUNTIME_LIBRARY)
+                    set(ONNXRUNTIME_FOUND TRUE)
+                    message(STATUS "Found ONNX Runtime via Homebrew: ${ONNXRUNTIME_PREFIX}")
+                endif()
+            endif()
+        endif()
+        
+        # Try standard system paths
+        if(NOT ONNXRUNTIME_FOUND)
+            find_path(ONNXRUNTIME_INCLUDE_DIRS onnxruntime/onnxruntime_cxx_api.h
+                PATHS /usr/local/include /usr/include
+            )
+            find_library(ONNXRUNTIME_LIBRARY onnxruntime
+                PATHS /usr/local/lib /usr/lib
+            )
+            if(ONNXRUNTIME_INCLUDE_DIRS AND ONNXRUNTIME_LIBRARY)
                 set(ONNXRUNTIME_FOUND TRUE)
-                message(STATUS "Found ONNX Runtime via Homebrew: ${ONNXRUNTIME_PREFIX}")
+                message(STATUS "Found ONNX Runtime in system paths")
             endif()
         endif()
     endif()
-    
-    # Try standard system paths
-    if(NOT ONNXRUNTIME_FOUND)
-        find_path(ONNXRUNTIME_INCLUDE_DIRS onnxruntime/onnxruntime_cxx_api.h
-            PATHS /usr/local/include /usr/include
-        )
-        find_library(ONNXRUNTIME_LIBRARY onnxruntime
-            PATHS /usr/local/lib /usr/lib
-        )
-        if(ONNXRUNTIME_INCLUDE_DIRS AND ONNXRUNTIME_LIBRARY)
-            set(ONNXRUNTIME_FOUND TRUE)
-            message(STATUS "Found ONNX Runtime in system paths")
-        endif()
-    endif()
-endif()
 
-if(NOT ONNXRUNTIME_FOUND)
-    message(FATAL_ERROR "ONNX Runtime not found. Install via: brew install onnxruntime")
+    if(NOT ONNXRUNTIME_FOUND)
+        message(FATAL_ERROR "ONNX Runtime not found. Install via: brew install onnxruntime")
+    endif()
 endif()
 
 # =============================================================================
