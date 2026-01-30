@@ -6,10 +6,23 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <cstdlib>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// Cross-platform temp directory
+std::string get_temp_dir() {
+#ifdef _WIN32
+    const char* tmp = std::getenv("TEMP");
+    if (!tmp) tmp = std::getenv("TMP");
+    if (!tmp) tmp = ".";
+    return std::string(tmp) + "\\";
+#else
+    return "/tmp/";
+#endif
+}
 
 // Helper: Generate a sine wave
 std::vector<float> generate_sine_wave(float freq, float duration, int sample_rate) {
@@ -73,7 +86,7 @@ bool test_read_valid_wav() {
     std::vector<float> original = generate_sine_wave(440.0f, 0.1f, sample_rate);
 
     // Write to temp file
-    std::string test_path = "/tmp/test_wav_reader.wav";
+    std::string test_path = get_temp_dir() + "test_wav_reader.wav";
     TEST_ASSERT(write_test_wav(test_path, original, sample_rate), "should write test WAV file");
 
     // Read it back
@@ -112,7 +125,7 @@ bool test_read_missing_file() {
 // Test reading invalid file (not a WAV)
 bool test_read_invalid_file() {
     // Write a non-WAV file
-    std::string test_path = "/tmp/test_invalid.wav";
+    std::string test_path = get_temp_dir() + "test_invalid.wav";
     FILE* f = fopen(test_path.c_str(), "wb");
     if (f) {
         fwrite("This is not a WAV file", 1, 22, f);
