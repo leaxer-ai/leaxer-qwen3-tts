@@ -157,14 +157,15 @@ std::vector<float> TTSEngine::synthesize(const std::string& text,
     
     std::cout << "[TTSEngine] Text: " << text << std::endl;
     
+    // Wrap text in proper chat template:
+    // <|im_start|>assistant<tts>\n{text}<|tts_eos|><|im_end|>
+    std::string formatted_text = "<|im_start|>assistant<tts>\n" + text + "<|tts_eos|><|im_end|>";
+    
     std::vector<int64_t> token_ids;
     
-    // Add TTS BOS token
-    token_ids.push_back(onnx_config::TTS_BOS);
-    
-    // Tokenize text using BPE tokenizer
+    // Tokenize the full formatted text
     if (io::is_tokenizer_ready()) {
-        std::vector<int32_t> text_tokens = io::tokenize(text);
+        std::vector<int32_t> text_tokens = io::tokenize(formatted_text);
         std::cout << "[TTSEngine] Tokenized to " << text_tokens.size() << " tokens: ";
         for (size_t i = 0; i < std::min(text_tokens.size(), size_t(10)); i++) {
             std::cout << text_tokens[i] << " ";
@@ -178,13 +179,11 @@ std::vector<float> TTSEngine::synthesize(const std::string& text,
     } else {
         // Fallback: placeholder tokenization (for testing only)
         std::cerr << "[TTSEngine] Warning: Using placeholder tokenization" << std::endl;
-        for (char c : text) {
+        std::cerr << "[TTSEngine] TTS will NOT work correctly without tokenizer!" << std::endl;
+        for (char c : formatted_text) {
             token_ids.push_back(static_cast<int64_t>(c) + 1000);
         }
     }
-    
-    // Add TTS EOS token
-    token_ids.push_back(onnx_config::TTS_EOS);
     
     return synthesize_tokens(token_ids, params);
 }
@@ -330,6 +329,30 @@ std::vector<float> TTSEngine::run_codec_embed(int64_t codec_token) {
     
     float* output_data = output_tensors[0].GetTensorMutableData<float>();
     return std::vector<float>(output_data, output_data + onnx_config::HIDDEN_SIZE);
+}
+
+std::vector<float> TTSEngine::run_codec_embed_batch(const std::vector<int64_t>& codec_tokens) {
+    // Input: input_ids [batch x num_tokens]
+    // Output: embeds [batch x num_tokens x 1024]
+    
+    const int64_t num_tokens = static_cast<int64_t>(codec_tokens.size());
+    std::array<int64_t, 2> input_shape = {1, num_tokens};
+    
+    Ort::Value input_tensor = Ort::Value::CreateTensor<int64_t>(
+        *memory_info_, const_cast<int64_t*>(codec_tokens.data()), codec_tokens.size(),
+        input_shape.data(), input_shape.size());
+    
+    const char* input_names[] = {"input_ids"};
+    const char* output_names[] = {"embeds"};
+    
+    auto output_tensors = codec_embed_->Run(
+        Ort::RunOptions{nullptr},
+        input_names, &input_tensor, 1,
+        output_names, 1);
+    
+    float* output_data = output_tensors[0].GetTensorMutableData<float>();
+    size_t output_size = num_tokens * onnx_config::HIDDEN_SIZE;
+    return std::vector<float>(output_data, output_data + output_size);
 }
 
 std::vector<float> TTSEngine::run_code_predictor_embed(int64_t subcode_token, int64_t generation_step) {

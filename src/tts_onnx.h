@@ -145,6 +145,11 @@ private:
     // Last hidden state for code predictor
     std::vector<float> last_hidden_;  // [1 x 1 x 1024]
     
+    // Trailing text hidden states (added during generation)
+    std::vector<float> trailing_text_hidden_;  // [num_steps x 1024]
+    std::vector<float> tts_pad_embed_;         // [1 x 1024]
+    int trailing_len_ = 0;
+    
     // State
     bool ready_ = false;
     std::string error_msg_;
@@ -168,6 +173,11 @@ private:
     // input_ids: [batch x 1] single codec token
     // Returns: embedding [batch x 1 x hidden_size]
     std::vector<float> run_codec_embed(int64_t codec_token);
+    
+    // Run codec embedding for multiple tokens at once
+    // input_ids: multiple codec tokens
+    // Returns: embeddings [num_tokens x hidden_size]
+    std::vector<float> run_codec_embed_batch(const std::vector<int64_t>& codec_tokens);
     
     // Run sub-code embedding model
     // input_ids: [batch x 1] sub-codec token
