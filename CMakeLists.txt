@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(leaxer-qwen VERSION 0.1.0 LANGUAGES C CXX)
+project(leaxer-qwen3-tts VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,157 +7,150 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
 option(LEAXER_QWEN_BUILD_TESTS "Build tests" ON)
-option(LEAXER_QWEN_STATIC "Build static library" ON)
 
-# ggml submodule
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/extern/ggml/CMakeLists.txt")
-    message(STATUS "ggml submodule not found, will need to initialize:")
-    message(STATUS "  git submodule add https://github.com/ggerganov/ggml extern/ggml")
-    message(STATUS "  git submodule update --init --recursive")
-endif()
+# GPU Acceleration (requires ONNX Runtime built with these providers)
+option(LEAXER_COREML "Enable CoreML Execution Provider (macOS)" OFF)
+option(LEAXER_CUDA "Enable CUDA Execution Provider (NVIDIA)" OFF)
+option(LEAXER_ROCM "Enable ROCm Execution Provider (AMD)" OFF)
+option(LEAXER_DIRECTML "Enable DirectML Execution Provider (Windows)" OFF)
 
-if(EXISTS "${CMAKE_SOURCE_DIR}/extern/ggml/CMakeLists.txt")
-    add_subdirectory(extern/ggml)
+# =============================================================================
+# ONNX Runtime (required)
+# User must provide: -DONNXRUNTIME_DIR=/path/to/onnxruntime
+# Or have it installed in standard system paths
+# =============================================================================
+
+if(ONNXRUNTIME_DIR)
+    set(ONNXRUNTIME_INCLUDE_DIRS "${ONNXRUNTIME_DIR}/include")
+    find_library(ONNXRUNTIME_LIBRARY 
+        NAMES onnxruntime
+        PATHS "${ONNXRUNTIME_DIR}/lib"
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+    message(STATUS "Using ONNX Runtime from: ${ONNXRUNTIME_DIR}")
 else()
-    message(WARNING "ggml not found - build will fail until submodule is initialized")
+    # Try standard paths
+    find_path(ONNXRUNTIME_INCLUDE_DIRS 
+        NAMES onnxruntime_cxx_api.h onnxruntime/onnxruntime_cxx_api.h
+        PATHS /usr/local/include /usr/include /opt/homebrew/include
+    )
+    find_library(ONNXRUNTIME_LIBRARY 
+        NAMES onnxruntime
+        PATHS /usr/local/lib /usr/lib /opt/homebrew/lib
+    )
 endif()
 
-# Include directories
-include_directories(
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-)
+if(NOT ONNXRUNTIME_INCLUDE_DIRS OR NOT ONNXRUNTIME_LIBRARY)
+    message(FATAL_ERROR "ONNX Runtime not found. Specify -DONNXRUNTIME_DIR=/path/to/onnxruntime")
+endif()
 
-# Source files - ggml ops
-set(GGML_OPS_SOURCES
-    src/ggml_ops/snake_beta.cpp
-    src/ggml_ops/rms_norm.cpp
-    src/ggml_ops/rope.cpp
-    src/ggml_ops/conv1d.cpp
-)
+message(STATUS "ONNX Runtime include: ${ONNXRUNTIME_INCLUDE_DIRS}")
+message(STATUS "ONNX Runtime library: ${ONNXRUNTIME_LIBRARY}")
 
-# Source files - vocoder
-set(VOCODER_SOURCES
-    src/vocoder/split_rvq.cpp
-    src/vocoder/causal_conv.cpp
-    src/vocoder/convnext.cpp
-    src/vocoder/upsample.cpp
-    src/vocoder/vocoder.cpp
-)
+# =============================================================================
+# Sources
+# =============================================================================
 
-# Source files - model
-set(MODEL_SOURCES
-    src/model/attention.cpp
-    src/model/ffn.cpp
-    src/model/transformer.cpp
-    src/model/transformer_cached.cpp
-    src/model/code_predictor.cpp
-    src/model/qwen_tts.cpp
-)
-
-# Source files - io
-set(IO_SOURCES
-    src/io/gguf_loader.cpp
+set(LIB_SOURCES
     src/io/tokenizer.cpp
     src/io/wav_writer.cpp
+    src/io/wav_reader.cpp
+    src/io/mel.cpp
+    src/tts_onnx.cpp
 )
 
-# All library sources
-set(LIB_SOURCES
-    ${GGML_OPS_SOURCES}
-    ${VOCODER_SOURCES}
-    ${MODEL_SOURCES}
-    ${IO_SOURCES}
-)
-
+# =============================================================================
 # Library
+# =============================================================================
+
 add_library(leaxer_qwen_lib ${LIB_SOURCES})
 target_include_directories(leaxer_qwen_lib PUBLIC
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${ONNXRUNTIME_INCLUDE_DIRS}
 )
-if(TARGET ggml)
-    target_link_libraries(leaxer_qwen_lib PUBLIC ggml)
+target_link_libraries(leaxer_qwen_lib PUBLIC ${ONNXRUNTIME_LIBRARY})
+target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_ONNX=1)
+
+# GPU providers (compile definitions only - runtime checks if available)
+if(LEAXER_COREML AND APPLE)
+    find_file(COREML_HEADER coreml_provider_factory.h
+        PATHS ${ONNXRUNTIME_INCLUDE_DIRS} ${ONNXRUNTIME_INCLUDE_DIRS}/onnxruntime
+        NO_DEFAULT_PATH
+    )
+    if(COREML_HEADER)
+        target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_COREML=1)
+        target_link_libraries(leaxer_qwen_lib PUBLIC "-framework CoreML" "-framework Foundation")
+    else()
+        message(WARNING "CoreML requested but coreml_provider_factory.h not found")
+    endif()
 endif()
 
-# Main executable
-add_executable(leaxer-qwen src/leaxer_qwen.cpp)
-target_link_libraries(leaxer-qwen PRIVATE leaxer_qwen_lib)
+if(LEAXER_CUDA)
+    target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_CUDA=1)
+endif()
 
-# Version info
-target_compile_definitions(leaxer-qwen PRIVATE
-    LEAXER_QWEN_VERSION="${PROJECT_VERSION}"
-)
+if(LEAXER_ROCM)
+    target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_ROCM=1)
+endif()
 
+if(LEAXER_DIRECTML AND WIN32)
+    target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_DIRECTML=1)
+endif()
+
+# =============================================================================
+# Executable
+# =============================================================================
+
+add_executable(leaxer-qwen3-tts src/main_onnx.cpp)
+target_link_libraries(leaxer-qwen3-tts PRIVATE leaxer_qwen_lib)
+target_compile_definitions(leaxer-qwen3-tts PRIVATE LEAXER_QWEN_VERSION="${PROJECT_VERSION}")
+
+# =============================================================================
 # Tests
+# =============================================================================
+
 if(LEAXER_QWEN_BUILD_TESTS)
     enable_testing()
-
-    # Test utilities (header-only for now)
-
-    # Component tests
-    add_executable(test_snakebeta tests/test_snakebeta.cpp)
-    target_link_libraries(test_snakebeta PRIVATE leaxer_qwen_lib)
-    add_test(NAME snakebeta COMMAND test_snakebeta)
-
-    # WAV writer test
-    add_executable(test_wav tests/test_wav.cpp)
-    target_link_libraries(test_wav PRIVATE leaxer_qwen_lib)
-    add_test(NAME wav COMMAND test_wav)
-
-    # RMSNorm test
-    add_executable(test_rmsnorm tests/test_rmsnorm.cpp)
-    target_link_libraries(test_rmsnorm PRIVATE leaxer_qwen_lib)
-    add_test(NAME rmsnorm COMMAND test_rmsnorm)
-
-    # Conv1d test
-    add_executable(test_conv1d tests/test_conv1d.cpp)
-    target_link_libraries(test_conv1d PRIVATE leaxer_qwen_lib)
-    add_test(NAME conv1d COMMAND test_conv1d)
-
-    # Tokenizer test
+    
     add_executable(test_tokenizer tests/test_tokenizer.cpp)
     target_link_libraries(test_tokenizer PRIVATE leaxer_qwen_lib)
     add_test(NAME tokenizer COMMAND test_tokenizer)
 
-    # Tokenizer real test (against Python fixtures)
     add_executable(test_tokenizer_real tests/test_tokenizer_real.cpp)
     target_link_libraries(test_tokenizer_real PRIVATE leaxer_qwen_lib)
     add_test(NAME tokenizer_real COMMAND test_tokenizer_real)
 
-    # GGUF mapping test
-    add_executable(test_gguf_mapping tests/test_gguf_mapping.cpp)
-    target_link_libraries(test_gguf_mapping PRIVATE leaxer_qwen_lib)
-    add_test(NAME gguf_mapping COMMAND test_gguf_mapping)
+    add_executable(test_onnx tests/test_onnx.cpp)
+    target_link_libraries(test_onnx PRIVATE leaxer_qwen_lib)
+    add_test(NAME onnx COMMAND test_onnx)
 
-    # End-to-end test
-    add_executable(test_e2e tests/test_e2e.cpp)
-    target_link_libraries(test_e2e PRIVATE leaxer_qwen_lib)
-    add_test(NAME e2e COMMAND test_e2e)
+    add_executable(test_wav_reader tests/test_wav_reader.cpp)
+    target_link_libraries(test_wav_reader PRIVATE leaxer_qwen_lib)
+    add_test(NAME wav_reader COMMAND test_wav_reader)
 
-    # Real model test
-    add_executable(test_real_model tests/test_real_model.cpp)
-    target_link_libraries(test_real_model PRIVATE leaxer_qwen_lib)
-    add_test(NAME real_model COMMAND test_real_model)
-
-    # Speaker embedding test
-    add_executable(test_speaker_embedding tests/test_speaker_embedding.cpp)
-    target_link_libraries(test_speaker_embedding PRIVATE leaxer_qwen_lib)
-    add_test(NAME speaker_embedding COMMAND test_speaker_embedding)
-
-    # Audio quality verification test
-    add_executable(test_audio_quality tests/test_audio_quality.cpp)
-    target_link_libraries(test_audio_quality PRIVATE leaxer_qwen_lib)
-    add_test(NAME audio_quality COMMAND test_audio_quality)
+    add_executable(test_mel tests/test_mel.cpp)
+    target_link_libraries(test_mel PRIVATE leaxer_qwen_lib)
+    add_test(NAME mel COMMAND test_mel)
 endif()
 
+# =============================================================================
 # Install
-install(TARGETS leaxer-qwen DESTINATION bin)
-install(TARGETS leaxer_qwen_lib DESTINATION lib)
-install(FILES include/leaxer_qwen.h DESTINATION include)
+# =============================================================================
 
+install(TARGETS leaxer-qwen3-tts DESTINATION bin)
+install(TARGETS leaxer_qwen_lib DESTINATION lib)
+
+# =============================================================================
 # Summary
+# =============================================================================
+
 message(STATUS "")
-message(STATUS "leaxer-qwen v${PROJECT_VERSION}")
-message(STATUS "  Build tests: ${LEAXER_QWEN_BUILD_TESTS}")
-message(STATUS "  Static lib:  ${LEAXER_QWEN_STATIC}")
+message(STATUS "leaxer-qwen3-tts v${PROJECT_VERSION}")
+message(STATUS "  Tests:    ${LEAXER_QWEN_BUILD_TESTS}")
+message(STATUS "  CoreML:   ${LEAXER_COREML}")
+message(STATUS "  CUDA:     ${LEAXER_CUDA}")
+message(STATUS "  ROCm:     ${LEAXER_ROCM}")
+message(STATUS "  DirectML: ${LEAXER_DIRECTML}")
 message(STATUS "")

@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, refactor/onnx]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  ONNXRUNTIME_VERSION: "1.20.0"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz
+            ort_lib: libonnxruntime.so.1.20.0
+            ort_link: libonnxruntime.so
+          - os: macos-latest
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-osx-arm64-1.20.0.tgz
+            ort_lib: libonnxruntime.1.20.0.dylib
+            ort_link: libonnxruntime.dylib
+          - os: windows-2022
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-win-x64-1.20.0.zip
+            ort_lib: onnxruntime.dll
+            ort_link: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache ONNX Runtime
+        uses: actions/cache@v4
+        id: cache-ort
+        with:
+          path: onnxruntime
+          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v4
+
+      - name: Download ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p onnxruntime
+          cd onnxruntime
+          if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
+            curl -L -o ort.zip "${{ matrix.ort_url }}"
+            unzip -q ort.zip
+            rm ort.zip
+          else
+            curl -L -o ort.tgz "${{ matrix.ort_url }}"
+            tar xzf ort.tgz
+            rm ort.tgz
+          fi
+          # Move contents from extracted directory
+          ls -la
+          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "onnxruntime-*" | head -1)
+          echo "EXTRACTED_DIR=$EXTRACTED_DIR"
+          if [[ -n "$EXTRACTED_DIR" && -d "$EXTRACTED_DIR" ]]; then
+            cp -r "$EXTRACTED_DIR"/* .
+            rm -rf "$EXTRACTED_DIR"
+          fi
+          ls -la lib/
+          # Create symlink for versioned library (not needed on Windows)
+          if [[ -n "${{ matrix.ort_link }}" ]]; then
+            ln -sf "${{ matrix.ort_lib }}" "lib/${{ matrix.ort_link }}"
+          fi
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: build-${{ matrix.os }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'tests/**') }}
+          restore-keys: |
+            build-${{ matrix.os }}-
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DONNXRUNTIME_DIR="$(pwd)/onnxruntime" \
+            -DLEAXER_QWEN_BUILD_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build build --config Debug -j
+
+      - name: Run tests
+        shell: bash
+        run: |
+          cd build
+          ctest --output-on-failure -C Debug

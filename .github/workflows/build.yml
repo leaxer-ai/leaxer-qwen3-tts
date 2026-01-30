@@ -1,0 +1,135 @@
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  ONNXRUNTIME_VERSION: "1.20.0"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz
+            ort_lib: libonnxruntime.so.1.20.0
+            ort_link: libonnxruntime.so
+            binary: leaxer-qwen3-tts
+          - os: macos-latest
+            artifact: macos-arm64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-osx-arm64-1.20.0.tgz
+            ort_lib: libonnxruntime.1.20.0.dylib
+            ort_link: libonnxruntime.dylib
+            binary: leaxer-qwen3-tts
+          - os: windows-2022
+            artifact: windows-x64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-win-x64-1.20.0.zip
+            ort_lib: onnxruntime.dll
+            ort_link: ""
+            binary: leaxer-qwen3-tts.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ONNX Runtime
+        shell: bash
+        run: |
+          mkdir -p onnxruntime
+          cd onnxruntime
+          if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
+            curl -L -o ort.zip "${{ matrix.ort_url }}"
+            unzip -q ort.zip
+            rm ort.zip
+          else
+            curl -L -o ort.tgz "${{ matrix.ort_url }}"
+            tar xzf ort.tgz
+            rm ort.tgz
+          fi
+          # Move contents from extracted directory
+          ls -la
+          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "onnxruntime-*" | head -1)
+          echo "EXTRACTED_DIR=$EXTRACTED_DIR"
+          if [[ -n "$EXTRACTED_DIR" && -d "$EXTRACTED_DIR" ]]; then
+            cp -r "$EXTRACTED_DIR"/* .
+            rm -rf "$EXTRACTED_DIR"
+          fi
+          ls -la lib/
+          # Create symlink for versioned library (not needed on Windows)
+          if [[ -n "${{ matrix.ort_link }}" ]]; then
+            ln -sf "${{ matrix.ort_lib }}" "lib/${{ matrix.ort_link }}"
+          fi
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DONNXRUNTIME_DIR="$(pwd)/onnxruntime" \
+            -DLEAXER_QWEN_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Prepare release bundle
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
+            cp build/Release/${{ matrix.binary }} dist/
+            cp onnxruntime/lib/${{ matrix.ort_lib }} dist/
+          else
+            cp build/${{ matrix.binary }} dist/
+            cp onnxruntime/lib/${{ matrix.ort_lib }} dist/
+            if [[ -n "${{ matrix.ort_link }}" ]]; then
+              cd dist && ln -sf ${{ matrix.ort_lib }} ${{ matrix.ort_link }}
+            fi
+          fi
+
+      - name: Set rpath (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          install_name_tool -add_rpath @executable_path dist/${{ matrix.binary }}
+
+      - name: Set rpath (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          patchelf --set-rpath '$ORIGIN' dist/${{ matrix.binary }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: leaxer-qwen3-tts-${{ matrix.artifact }}
+          path: dist/
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release archives
+        run: |
+          cd artifacts
+          for dir in */; do
+            name="${dir%/}"
+            zip -r "../${name}.zip" "$dir"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: "*.zip"
+          generate_release_notes: true

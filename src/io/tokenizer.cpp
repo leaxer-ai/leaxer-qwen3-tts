@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <cctype>
 #include <cstring>
+#include <climits>
 #include <regex>
 
 namespace leaxer_qwen {
@@ -552,6 +553,11 @@ std::string token_to_string(int32_t id) {
 
 int32_t string_to_token(const std::string& token) {
     return get_tokenizer().string_to_token(token);
+}
+
+bool is_tokenizer_ready() {
+    auto& tok = get_tokenizer();
+    return tok.is_loaded() && tok.merges_loaded();
 }
 
 } // namespace io

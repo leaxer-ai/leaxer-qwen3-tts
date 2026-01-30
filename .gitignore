@@ -16,7 +16,9 @@ cmake-build-*/
 *.safetensors
 *.pt
 *.pth
-models/
+*.onnx
+onnx/
+hf_onnx_bundle/
 
 # Test fixtures (generated)
 tests/fixtures/*.bin
@@ -47,3 +49,7 @@ Thumbs.db
 
 # Todo
 .todo/
+DEVELOPMENT.md
+
+# Dependencies (built from source)
+deps/

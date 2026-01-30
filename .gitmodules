@@ -1,3 +1,0 @@
-[submodule "extern/ggml"]
-	path = extern/ggml
-	url = https://github.com/ggerganov/ggml

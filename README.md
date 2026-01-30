@@ -1,56 +1,135 @@
-# 🚧 Work in Progress 🚧
+# leaxer-qwen3-tts
 
-Pure C++ implementation of Qwen3-TTS using ggml tensor library.
+Single binary, C++ implementation of [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) running on top of ONNX Runtime.
 
-## Goal
-
-Single binary `leaxer-qwen` that converts text to speech without Python runtime dependency.
+## Usage
 
 ```bash
-leaxer-qwen -m qwen3-tts-1.7b.gguf -p "Hello world" -o output.wav
+leaxer-qwen3-tts -m <model_dir> -p "Hello world" -o output.wav
+
+# With language hint
+leaxer-qwen3-tts -m onnx_kv_06b -p "你好世界" --lang zh -o chinese.wav
+
+# Sampling controls
+leaxer-qwen3-tts -m onnx_kv_06b -p "Hello" --temp 0.7 --top-k 30 --top-p 0.9
 ```
+
+### Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-m, --model` | ONNX model directory | required |
+| `-p, --prompt` | Text to synthesize | required |
+| `-o, --output` | Output WAV path | `output.wav` |
+| `--lang` | Language: `auto`, `en`, `zh`, `ja`, `ko` | `auto` |
+| `--temp` | Sampling temperature | `0.8` |
+| `--top-k` | Top-k sampling | `50` |
+| `--top-p` | Top-p (nucleus) sampling | `0.95` |
+| `--max-tokens` | Max generation tokens | `2048` |
 
 ## Building
 
+### Requirements
+- CMake 3.14+
+- C++17 compiler
+- ONNX Runtime (user-provided)
+
+### Build
 ```bash
-# Initialize ggml submodule
-git submodule add https://github.com/ggerganov/ggml extern/ggml
-git submodule update --init --recursive
+# Download ONNX Runtime from https://github.com/microsoft/onnxruntime/releases
+# Extract to a directory, then:
 
-# Build
-cmake -B build
-cmake --build build
+cmake -B build -DONNXRUNTIME_DIR=/path/to/onnxruntime
+cmake --build build -j
 
-# Run tests
-ctest --test-dir build
+./build/leaxer-qwen3-tts --help
 ```
+
+### macOS (Homebrew)
+```bash
+brew install onnxruntime cmake
+cmake -B build -DONNXRUNTIME_DIR=$(brew --prefix onnxruntime)
+cmake --build build -j
+```
+
+### GPU Acceleration
+```bash
+# CoreML (macOS, requires ONNX Runtime with CoreML support)
+cmake -B build -DONNXRUNTIME_DIR=/path/to/onnxruntime -DLEAXER_COREML=ON
+
+# CUDA (NVIDIA)
+cmake -B build -DONNXRUNTIME_DIR=/path/to/onnxruntime -DLEAXER_CUDA=ON
+
+# ROCm (AMD)
+cmake -B build -DONNXRUNTIME_DIR=/path/to/onnxruntime -DLEAXER_ROCM=ON
+```
+
+Note: GPU acceleration requires ONNX Runtime built with the corresponding execution provider. The default Microsoft releases include CoreML for macOS.
+
+## Models
+
+Download ONNX models from [zukky/Qwen3-TTS-ONNX-DLL](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL):
+
+```bash
+# Clone model repo (or download manually)
+git lfs install
+git clone https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL models
+
+# Use the 0.6B model
+./build/leaxer-qwen3-tts -m onnx/onnx_kv_06b -p "Hello"
+```
+
+### Required files in model directory:
+- `text_project.onnx` — text token embeddings
+- `codec_embed.onnx` — codec token embeddings  
+- `code_predictor_embed.onnx` — sub-codec embeddings
+- `talker_prefill.onnx` — transformer prefill
+- `talker_decode.onnx` — transformer decode (with KV cache)
+- `code_predictor.onnx` — predict codebooks 1-15
+- `tokenizer12hz_decode.onnx` — vocoder (codes → audio)
+
+Also needs tokenizer files in `../models/Qwen3-TTS-12Hz-0.6B-Base/`:
+- `vocab.json`
+- `merges.txt`
 
 ## Architecture
 
 ```
-Text → Tokenizer → Qwen3 LLM → Code Predictor → Split RVQ → Vocoder → 24kHz WAV
+Text → BPE Tokenizer → Talker (prefill/decode) → Code Predictor → Vocoder → WAV
+                              ↓                        ↓
+                           KV Cache              Codebooks 1-15
 ```
 
-### Components
+The model generates 16 audio codebooks per frame at 12Hz, then the vocoder upsamples to 24kHz audio.
 
-- **ggml_ops/**: Custom tensor operations (SnakeBeta, RoPE, etc.)
-- **vocoder/**: Audio decoder (RVQ + Upsample stages)
-- **model/**: Transformer blocks, attention, FFN
-- **io/**: GGUF loading, tokenization, WAV output
+## Voice Clone
 
-## Development
+Clone any voice from a 3-second reference audio:
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for:
-- Audio testing workflow with validation scripts
-- Debugging tips and common issues
-- Architecture details
+```bash
+leaxer-qwen3-tts -m onnx/onnx_kv_06b -p "Hello world" --ref voice_sample.wav -o output.wav
+```
 
-## Reference
+The reference audio should be:
+- WAV format (8/16/24/32-bit PCM or float)
+- At least 3 seconds of clear speech
+- Will be resampled to 24kHz internally
 
-- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) - Original Python implementation
-- [ggml](https://github.com/ggerganov/ggml) - Tensor library
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - Reference for ggml patterns
+## Roadmap
+
+| Feature | Requires | Status |
+|---------|----------|--------|
+| Voice clone (`--ref`) | 0.6B-Base | Done |
+| GPU acceleration | ONNX Runtime + CoreML/CUDA | Done |
+| Preset speakers (`--speaker`) | 0.6B-CustomVoice | Planned |
+| Voice instructions (`--instruct`) | 1.7B-VoiceDesign | Planned |
+| Single static binary | Static ONNX Runtime | Planned | 
+
+## Credits
+
+- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba
+- [zukky/Qwen3-TTS-ONNX-DLL](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL) for ONNX exports, big thanks to Mr. Daishi Suzuki (zukky)!
 
 ## License
 
-MIT
+Apache 2.0 — see [LICENSE](LICENSE)

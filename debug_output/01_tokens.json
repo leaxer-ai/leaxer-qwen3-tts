@@ -1,9 +1,0 @@
-{
-  "name": "input_tokens",
-  "shape": [
-    1
-  ],
-  "dtype": "int32",
-  "min": 13048,
-  "max": 13048
-}
