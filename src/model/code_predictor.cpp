@@ -170,11 +170,20 @@ struct ggml_tensor * code_pred_transformer_layer(
     return output;
 }
 
-// Helper: argmax over an array
-static int argmax(const float * data, int n) {
+// Codec token range constants
+// Valid audio codes are 0-2047, special tokens 2048+ should be suppressed
+constexpr int CODEC_VALID_MAX = 2047;
+
+// Helper: argmax over an array with token suppression
+// Only considers tokens in range [0, CODEC_VALID_MAX] for audio codebooks
+static int argmax_suppress(const float * data, int n) {
     int best = 0;
-    float best_val = data[0];
-    for (int i = 1; i < n; i++) {
+    float best_val = -1e10f;
+    
+    // Only consider valid audio tokens (0-2047)
+    int effective_n = (n > CODEC_VALID_MAX + 1) ? (CODEC_VALID_MAX + 1) : n;
+    
+    for (int i = 0; i < effective_n; i++) {
         if (data[i] > best_val) {
             best_val = data[i];
             best = i;
@@ -538,10 +547,15 @@ struct ggml_tensor * code_predictor_forward(
             }
             apply_output_head(logits, normed_hidden, head, hidden_dim);
             
-            // Sample token (argmax)
+            // Sample token (argmax with suppression of special tokens)
             int head_out_dim = head->ne[1];
-            int token = argmax(logits, head_out_dim < CODEBOOK_VOCAB ? head_out_dim : CODEBOOK_VOCAB);
+            int token = argmax_suppress(logits, head_out_dim < CODEBOOK_VOCAB ? head_out_dim : CODEBOOK_VOCAB);
             all_codes[t * NUM_CODEBOOKS + cb] = token;
+            
+            // Debug: warn if token would have been invalid
+            if (token > CODEC_VALID_MAX) {
+                printf("WARNING: sampled token %d > %d (should not happen after suppression)\n", token, CODEC_VALID_MAX);
+            }
             
             // Embed the sampled token using codec_embedding[cb-1]
             // codec_embedding[i] is for codebook i+1, so codec_embedding[cb-1] is for codebook cb
@@ -566,6 +580,38 @@ struct ggml_tensor * code_predictor_forward(
     free(logits);
     free(cb0_embed);
 
+    // Debug: print first 20 tokens for each codebook
+    printf("  First 20 generated tokens per codebook:\n");
+    for (int cb = 0; cb < NUM_CODEBOOKS; cb++) {
+        printf("    CB%2d: ", cb);
+        int print_count = seq_len < 20 ? seq_len : 20;
+        for (int t = 0; t < print_count; t++) {
+            printf("%d ", all_codes[t * NUM_CODEBOOKS + cb]);
+        }
+        printf("\n");
+    }
+    fflush(stdout);
+    
+    // Debug: check for invalid tokens (should all be 0-2047)
+    int invalid_count = 0;
+    for (int t = 0; t < seq_len; t++) {
+        for (int cb = 0; cb < NUM_CODEBOOKS; cb++) {
+            int code = all_codes[t * NUM_CODEBOOKS + cb];
+            if (code > CODEC_VALID_MAX) {
+                if (invalid_count < 10) {
+                    printf("  WARNING: Invalid token at t=%d cb=%d: %d (> %d)\n", t, cb, code, CODEC_VALID_MAX);
+                }
+                invalid_count++;
+            }
+        }
+    }
+    if (invalid_count > 0) {
+        printf("  TOTAL INVALID TOKENS: %d (should be 0!)\n", invalid_count);
+    } else {
+        printf("  All tokens valid (0-%d range)\n", CODEC_VALID_MAX);
+    }
+    fflush(stdout);
+    
     // Debug: print code distribution summary
     printf("  Code distribution summary:\n");
     for (int cb = 0; cb < NUM_CODEBOOKS; cb += 4) {
