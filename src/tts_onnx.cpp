@@ -185,8 +185,8 @@ std::unique_ptr<Ort::Session> TTSEngine::load_model(const std::string& filename)
         // Try CoreML (Apple Silicon GPU/Neural Engine)
         if (!provider_added) {
             try {
-                // Use MLProgram (CoreML 5+) with all compute units (CPU+GPU+ANE)
-                uint32_t coreml_flags = COREML_FLAG_CREATE_MLPROGRAM;
+                // Use default CoreML settings (NeuralNetwork format, all compute units)
+                uint32_t coreml_flags = COREML_FLAG_USE_NONE;
                 Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CoreML(opts, coreml_flags));
                 provider_added = true;
                 if (!logged_provider) {
