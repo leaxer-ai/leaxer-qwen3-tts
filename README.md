@@ -109,8 +109,10 @@ The reference audio should be:
 | Feature | Requires | Status |
 |---------|----------|--------|
 | Voice clone (`--ref`) | 0.6B-Base | Done |
+| GPU acceleration | ONNX Runtime + CoreML/CUDA | Done |
 | Preset speakers (`--speaker`) | 0.6B-CustomVoice | Waiting for ONNX export |
 | Voice instructions (`--instruct`) | 1.7B-VoiceDesign | Waiting for ONNX export |
+| Single static binary | Static ONNX Runtime | Planned |
 
 Currently only 0.6B-Base ONNX models are available from [zukky's exports](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL).
 
