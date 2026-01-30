@@ -157,16 +157,19 @@ std::vector<float> TTSEngine::synthesize(const std::string& text,
     
     std::cout << "[TTSEngine] Text: " << text << std::endl;
     
-    // Build token sequence with proper special token IDs:
-    // [IM_START, ...text_tokens..., IM_END, TTS_BOS]
-    // The BPE tokenizer doesn't recognize special tokens, so we add them manually
+    // Build token sequence matching Python format:
+    // [IM_START, ASSISTANT, TTS_BOS, ...text_tokens..., TTS_EOS, IM_END]
+    // Positions:  [0]       [1]       [2]     [3:-2]       [-2]     [-1]
+    // role_embed uses [0:3], text uses [3:-2]
     
     std::vector<int64_t> token_ids;
     
-    // Add IM_START (151644)
-    token_ids.push_back(onnx_config::IM_START);
+    // Role tokens (positions 0-2)
+    token_ids.push_back(onnx_config::IM_START);   // 151644 - <|im_start|>
+    token_ids.push_back(onnx_config::ASSISTANT);  // 77091  - "assistant"
+    token_ids.push_back(onnx_config::TTS_BOS);    // 151672 - <tts_text_bos>
     
-    // Tokenize just the text content
+    // Tokenize the text content (positions 3 to -3)
     if (io::is_tokenizer_ready()) {
         std::vector<int32_t> text_tokens = io::tokenize(text);
         std::cout << "[TTSEngine] Tokenized to " << text_tokens.size() << " tokens: ";
@@ -184,9 +187,9 @@ std::vector<float> TTSEngine::synthesize(const std::string& text,
         return {};
     }
     
-    // Add IM_END (151645) and TTS_BOS (151672)
-    token_ids.push_back(onnx_config::IM_END);
-    token_ids.push_back(onnx_config::TTS_BOS);
+    // End tokens (positions -2, -1)
+    token_ids.push_back(onnx_config::TTS_EOS);    // 151673 - <tts_text_eod>
+    token_ids.push_back(onnx_config::IM_END);     // 151645 - <|im_end|>
     
     std::cout << "[TTSEngine] Full token sequence: [";
     for (size_t i = 0; i < token_ids.size(); i++) {
@@ -302,10 +305,10 @@ std::vector<float> TTSEngine::build_prompt_embeddings(const std::vector<int64_t>
     };
     std::vector<float> codec_embeds = run_codec_embed_batch(codec_prefill);  // [5 x 1024]
     
-    // 3. Role embedding (first token: IM_START)
-    // Format: [IM_START, ...text..., IM_END, TTS_BOS]
-    std::vector<int64_t> role_ids = {input_ids[0]};  // Just IM_START
-    std::vector<float> role_embed = run_text_project(role_ids);  // [1 x 1024]
+    // 3. Role embedding (first 3 tokens: IM_START, ASSISTANT, TTS_BOS)
+    // Format: [IM_START, ASSISTANT, TTS_BOS, ...text..., TTS_EOS, IM_END]
+    std::vector<int64_t> role_ids(input_ids.begin(), input_ids.begin() + 3);
+    std::vector<float> role_embed = run_text_project(role_ids);  // [3 x 1024]
     
     // 4. Build pad block to align with codec embeddings
     // We have 5 codec positions, need pad for first 3, then tts_bos for 4th
@@ -330,12 +333,12 @@ std::vector<float> TTSEngine::build_prompt_embeddings(const std::vector<int64_t>
     std::vector<float> talker_embed = add_vectors(text_part, codec_partial);
     
     // 7. First text token + last codec embedding (BOS)
-    // Format: [IM_START, ...text..., IM_END, TTS_BOS]
-    // text_start = 1 (after IM_START)
-    // text_end = len - 2 (before IM_END and TTS_BOS)
+    // Format: [IM_START, ASSISTANT, TTS_BOS, ...text..., TTS_EOS, IM_END]
+    // text_start = 3 (after role tokens)
+    // text_end = len - 2 (before TTS_EOS and IM_END)
     
-    size_t text_start = 1;  // After IM_START
-    size_t text_end = input_ids.size() - 2;  // Before IM_END and TTS_BOS
+    size_t text_start = 3;  // After role tokens
+    size_t text_end = input_ids.size() - 2;  // Before end tokens
     
     // First text token embedding
     std::vector<int64_t> first_text_id = {input_ids[text_start]};
@@ -349,7 +352,7 @@ std::vector<float> TTSEngine::build_prompt_embeddings(const std::vector<int64_t>
     
     // 8. Build full prompt
     std::vector<float> prompt;
-    prompt.reserve((1 + 4 + 1) * HIDDEN);  // role(1) + talker(4) + first_text(1)
+    prompt.reserve((3 + 4 + 1) * HIDDEN);  // role(3) + talker(4) + first_text(1)
     prompt.insert(prompt.end(), role_embed.begin(), role_embed.end());
     prompt.insert(prompt.end(), talker_embed.begin(), talker_embed.end());
     prompt.insert(prompt.end(), text_first_combined.begin(), text_first_combined.end());
@@ -371,7 +374,7 @@ std::vector<float> TTSEngine::build_prompt_embeddings(const std::vector<int64_t>
     trailing_len_ = static_cast<int>(trailing_text_hidden_.size() / HIDDEN);
     
     std::cout << "[TTSEngine] Prompt structure:" << std::endl;
-    std::cout << "  - Role: 1 (IM_START)" << std::endl;
+    std::cout << "  - Role: 3 (IM_START, ASSISTANT, TTS_BOS)" << std::endl;
     std::cout << "  - Talker embed: 4 (pad+bos added to codec prefill)" << std::endl;
     std::cout << "  - First text: 1" << std::endl;
     std::cout << "  - Trailing text: " << trailing_len_ << " steps" << std::endl;

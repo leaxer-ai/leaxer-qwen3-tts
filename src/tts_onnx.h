@@ -39,6 +39,7 @@ namespace onnx_config {
     // Chat tokens (for prompt formatting)
     constexpr int64_t IM_START = 151644;      // <|im_start|>
     constexpr int64_t IM_END = 151645;        // <|im_end|>
+    constexpr int64_t ASSISTANT = 77091;      // "assistant" text token
     
     // Codec tokens (within talker vocab of 3072)
     constexpr int64_t CODEC_BOS = 2149;
