@@ -59,10 +59,17 @@ jobs:
       - name: Configure CMake
         shell: bash
         run: |
+          if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
+            ORT_LIB="${{ github.workspace }}/onnxruntime/lib/onnxruntime.lib"
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            ORT_LIB="${{ github.workspace }}/onnxruntime/lib/libonnxruntime.dylib"
+          else
+            ORT_LIB="${{ github.workspace }}/onnxruntime/lib/libonnxruntime.so"
+          fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Debug \
             -DONNXRUNTIME_INCLUDE_DIRS=${{ github.workspace }}/onnxruntime/include \
-            -DONNXRUNTIME_LIBRARY=${{ github.workspace }}/onnxruntime/lib/libonnxruntime$([ "${{ matrix.os }}" == "windows-2022" ] && echo ".lib" || echo ".so") \
+            -DONNXRUNTIME_LIBRARY="$ORT_LIB" \
             -DLEAXER_QWEN_BUILD_TESTS=ON
 
       - name: Build tests
