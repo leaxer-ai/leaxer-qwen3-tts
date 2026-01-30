@@ -1,56 +1,75 @@
-# 🚧 Work in Progress 🚧
+# leaxer-qwen3-tts
 
-Pure C++ implementation of Qwen3-TTS using ggml tensor library.
+Pure C++ implementation of Qwen3-TTS text-to-speech.
 
 ## Goal
 
-Single binary `leaxer-qwen` that converts text to speech without Python runtime dependency.
+Single binary that converts text to speech without Python runtime dependency.
 
 ```bash
-leaxer-qwen -m qwen3-tts-1.7b.gguf -p "Hello world" -o output.wav
+leaxer-qwen -m models/ -p "Hello world" -o output.wav
 ```
+
+## Status
+
+🚧 **Work in Progress** — Refactoring to ONNX Runtime
+
+### Approach
+
+Using ONNX Runtime for reliable inference:
+- Pre-exported ONNX models handle M-RoPE, attention, KV-cache correctly
+- C++ orchestrates the generation loop
+- No manual tensor operations = fewer bugs
 
 ## Building
 
 ```bash
-# Initialize ggml submodule
-git submodule add https://github.com/ggerganov/ggml extern/ggml
-git submodule update --init --recursive
+# Dependencies
+# - ONNX Runtime (onnxruntime-cpp)
+# - CMake 3.16+
 
-# Build
 cmake -B build
 cmake --build build
 
-# Run tests
-ctest --test-dir build
+# Run
+./build/leaxer-qwen -m models/ -p "Hello world" -o output.wav
 ```
 
 ## Architecture
 
 ```
-Text → Tokenizer → Qwen3 LLM → Code Predictor → Split RVQ → Vocoder → 24kHz WAV
+Text → Tokenizer → Talker ONNX → Code Predictor ONNX → Vocoder ONNX → 24kHz WAV
+                   (prefill/decode)   (codebooks 1-15)    (codes→audio)
 ```
 
-### Components
+### ONNX Models
 
-- **ggml_ops/**: Custom tensor operations (SnakeBeta, RoPE, etc.)
-- **vocoder/**: Audio decoder (RVQ + Upsample stages)
-- **model/**: Transformer blocks, attention, FFN
-- **io/**: GGUF loading, tokenization, WAV output
+| Model | Purpose |
+|-------|---------|
+| `talker_prefill.onnx` | Process input prompt |
+| `talker_decode.onnx` | Generate tokens with KV-cache |
+| `code_predictor.onnx` | Predict sub-codebooks 1-15 |
+| `tokenizer12hz_decode.onnx` | Decode codes to audio |
+| `speaker_encoder.onnx` | Extract speaker embedding |
 
-## Development
+## Credits
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for:
-- Audio testing workflow with validation scripts
-- Debugging tips and common issues
-- Architecture details
+**ONNX models from:**
+- [zukky/Qwen3-TTS-ONNX-DLL](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL) — Apache-2.0
+- Huge thanks to zukky for the ONNX export work!
 
-## Reference
+**Original model:**
+- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba — Apache-2.0
 
-- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) - Original Python implementation
-- [ggml](https://github.com/ggerganov/ggml) - Tensor library
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - Reference for ggml patterns
+## References
+
+- [ONNX Runtime](https://onnxruntime.ai/) — Inference engine
+- [Qwen3-TTS Paper](https://arxiv.org/abs/2505.XXXXX) — Model architecture
 
 ## License
 
 MIT
+
+---
+
+*This project uses ONNX models derived from Qwen3-TTS. See [LICENSE](LICENSE) for details.*
