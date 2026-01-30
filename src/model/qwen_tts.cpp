@@ -31,6 +31,8 @@ struct ggml_tensor * transformer_block(
     struct ggml_tensor * k_weight,
     struct ggml_tensor * v_weight,
     struct ggml_tensor * o_weight,
+    struct ggml_tensor * q_norm_weight,
+    struct ggml_tensor * k_norm_weight,
     struct ggml_tensor * ffn_norm_weight,
     struct ggml_tensor * ffn_w1,
     struct ggml_tensor * ffn_w2,
@@ -55,6 +57,50 @@ constexpr int TTS_EOS_TOKEN_ID = 151673;
 constexpr int CODEC_PAD_ID = 2148;
 constexpr int CODEC_BOS_ID = 2149;
 constexpr int CODEC_EOS_ID = 2150;
+
+// Model dimensions (0.6B model)
+constexpr int TEXT_EMBED_DIM = 2048;
+constexpr int HIDDEN_DIM = 1024;
+constexpr int CODEC_VOCAB_SIZE = 3072;
+
+// ============================================================================
+// Text Projection MLP Helper
+// Architecture: Linear(2048→2048) → SiLU → Linear(2048→1024)
+// Projects text embeddings (2048-dim) to talker hidden dimension (1024-dim)
+// ============================================================================
+struct ggml_tensor * text_projection(
+    struct ggml_context * ctx,
+    struct ggml_tensor * input,           // [seq_len, 2048] or [2048, seq_len] text embeddings
+    struct ggml_tensor * fc1_weight,      // [2048, 2048]
+    struct ggml_tensor * fc1_bias,        // [2048]
+    struct ggml_tensor * fc2_weight,      // [1024, 2048]
+    struct ggml_tensor * fc2_bias)        // [1024]
+{
+    // fc1: Linear(2048 → 2048)
+    struct ggml_tensor * proj = ggml_mul_mat(ctx, fc1_weight, input);
+    
+    // Add bias (cast to F32 if needed)
+    struct ggml_tensor * bias1 = fc1_bias;
+    if (fc1_bias->type == GGML_TYPE_F16) {
+        bias1 = ggml_cast(ctx, fc1_bias, GGML_TYPE_F32);
+    }
+    proj = ggml_add(ctx, proj, bias1);
+    
+    // SiLU activation
+    proj = ggml_silu(ctx, proj);
+    
+    // fc2: Linear(2048 → 1024)
+    proj = ggml_mul_mat(ctx, fc2_weight, proj);
+    
+    // Add bias
+    struct ggml_tensor * bias2 = fc2_bias;
+    if (fc2_bias->type == GGML_TYPE_F16) {
+        bias2 = ggml_cast(ctx, fc2_bias, GGML_TYPE_F32);
+    }
+    proj = ggml_add(ctx, proj, bias2);
+    
+    return proj;  // [seq_len, 1024] or [1024, seq_len]
+}
 
 // Talker Forward Pass (Qwen3-TTS LLM)
 // Architecture: Embedding → Text Projection → 28 Transformer Blocks (with RoPE) → Final Norm → Output Projection
@@ -132,6 +178,8 @@ struct ggml_tensor * talker_forward(
             layer_w[2],  // k_weight
             layer_w[3],  // v_weight
             layer_w[4],  // o_weight
+            nullptr,     // q_norm_weight (TODO: add to layer_weights)
+            nullptr,     // k_norm_weight (TODO: add to layer_weights)
             layer_w[5],  // ffn_norm_weight
             layer_w[6],  // ffn_w1
             layer_w[7],  // ffn_w2
@@ -553,7 +601,183 @@ struct ggml_tensor * transformer_block_cached(
     KVCache * kv_cache,
     int start_pos);
 
-// Talker forward pass with KV caching
+// ============================================================================
+// Talker Forward with Combined Embeddings (CORRECT IMPLEMENTATION)
+// ============================================================================
+// CRITICAL: Input to talker is SUMMED embeddings, not concatenated!
+//   combined_input = text_projection(text_embed) + codec_embed
+//
+// This function takes pre-computed combined embeddings and runs through
+// the transformer layers. Use this during generation when embeddings
+// are already combined (text + codec or summed codebook embeddings).
+//
+// Parameters:
+//   combined_embeds: [hidden_dim, seq_len] pre-combined embeddings (1024-dim)
+//   layer_weights: transformer layer weights
+//   n_layers: number of transformer layers
+//   norm_weight: final RMSNorm weight
+//   lm_head_weight: output projection [codec_vocab, hidden_dim]
+//   kv_cache: KV cache for attention
+//   start_pos: starting position for KV cache
+// Returns: logits [codec_vocab, seq_len]
+// ============================================================================
+static struct ggml_tensor * talker_forward_from_embeds(
+    struct ggml_context * ctx,
+    struct ggml_tensor * combined_embeds,  // [hidden_dim=1024, seq_len] already combined
+    struct ggml_tensor ** layer_weights,
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight,
+    KVCache * kv_cache,
+    int start_pos) {
+
+    // Pass through transformer blocks with caching
+    struct ggml_tensor * hidden = combined_embeds;
+    for (int i = 0; i < n_layers; i++) {
+        struct ggml_tensor ** layer_w = &layer_weights[i * 9];
+
+        hidden = transformer_block_cached(
+            ctx,
+            hidden,
+            layer_w[0],  // attn_norm_weight
+            layer_w[1],  // q_weight
+            layer_w[2],  // k_weight
+            layer_w[3],  // v_weight
+            layer_w[4],  // o_weight
+            layer_w[5],  // ffn_norm_weight
+            layer_w[6],  // ffn_w1
+            layer_w[7],  // ffn_w2
+            layer_w[8],  // ffn_w3
+            i,           // layer_idx
+            kv_cache,
+            start_pos
+        );
+    }
+
+    // Final RMSNorm
+    struct ggml_tensor * normalized = ops::rms_norm(ctx, hidden, norm_weight, 1e-6f);
+
+    // Output projection to codec vocabulary (3072)
+    struct ggml_tensor * logits = ggml_mul_mat(ctx, lm_head_weight, normalized);
+
+    return logits;
+}
+
+// ============================================================================
+// Talker Forward with Hidden State Output
+// ============================================================================
+// Same as talker_forward_from_embeds but ALSO outputs the hidden state
+// (normalized hidden state BEFORE lm_head projection).
+// This hidden state is needed by the code predictor.
+//
+// Parameters:
+//   hidden_state_out: If not NULL, receives the normalized hidden state [hidden_dim, seq_len]
+//                     This is the hidden state AFTER RMS norm, BEFORE lm_head
+// Returns: logits [codec_vocab, seq_len]
+// ============================================================================
+static struct ggml_tensor * talker_forward_from_embeds_with_hidden(
+    struct ggml_context * ctx,
+    struct ggml_tensor * combined_embeds,  // [hidden_dim=1024, seq_len] already combined
+    struct ggml_tensor ** layer_weights,
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight,
+    KVCache * kv_cache,
+    int start_pos,
+    struct ggml_tensor ** hidden_state_out)  // OUTPUT: normalized hidden state
+{
+    // Pass through transformer blocks with caching
+    struct ggml_tensor * hidden = combined_embeds;
+    for (int i = 0; i < n_layers; i++) {
+        struct ggml_tensor ** layer_w = &layer_weights[i * 9];
+
+        hidden = transformer_block_cached(
+            ctx,
+            hidden,
+            layer_w[0],  // attn_norm_weight
+            layer_w[1],  // q_weight
+            layer_w[2],  // k_weight
+            layer_w[3],  // v_weight
+            layer_w[4],  // o_weight
+            layer_w[5],  // ffn_norm_weight
+            layer_w[6],  // ffn_w1
+            layer_w[7],  // ffn_w2
+            layer_w[8],  // ffn_w3
+            i,           // layer_idx
+            kv_cache,
+            start_pos
+        );
+    }
+
+    // Final RMSNorm - this is the hidden state needed by code predictor
+    struct ggml_tensor * normalized = ops::rms_norm(ctx, hidden, norm_weight, 1e-6f);
+
+    // Output the hidden state if requested
+    if (hidden_state_out) {
+        *hidden_state_out = normalized;
+    }
+
+    // Output projection to codec vocabulary (3072)
+    struct ggml_tensor * logits = ggml_mul_mat(ctx, lm_head_weight, normalized);
+
+    return logits;
+}
+
+// ============================================================================
+// Talker Forward with Proper Embedding Combination
+// ============================================================================
+// CORRECT FLOW (from Python reference):
+// 1. Text tokens → text_embedding(151936 vocab, 2048 dim) → text_embed
+// 2. text_embed → text_projection MLP → projected_text (1024 dim)
+// 3. Codec tokens → codec_embedding(3072 vocab, 1024 dim) → codec_embed
+// 4. combined = projected_text + codec_embed (element-wise SUM!)
+// 5. combined → transformer layers → logits
+//
+// During prefill: codec_ids are CODEC_PAD_ID for all text positions
+// During decode: input is sum of all 16 codebook embeddings + trailing text
+// ============================================================================
+static struct ggml_tensor * talker_forward_with_codec(
+    struct ggml_context * ctx,
+    struct ggml_tensor * text_token_ids,      // [seq_len] text tokens (151936 vocab)
+    struct ggml_tensor * codec_token_ids,     // [seq_len] codec tokens (3072 vocab) - use CODEC_PAD_ID for prefill
+    struct ggml_tensor * text_embed_weight,   // [text_vocab, 2048]
+    struct ggml_tensor * codec_embed_weight,  // [codec_vocab=3072, 1024]
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
+    struct ggml_tensor ** layer_weights,
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight,
+    KVCache * kv_cache,
+    int start_pos) {
+
+    // Step 1: Text Embedding (2048-dim)
+    struct ggml_tensor * text_embedded = ggml_get_rows(ctx, text_embed_weight, text_token_ids);
+
+    // Step 2: Text Projection (2048 → 1024)
+    struct ggml_tensor * text_proj = text_projection(
+        ctx, text_embedded,
+        text_proj_fc1_weight, text_proj_fc1_bias,
+        text_proj_fc2_weight, text_proj_fc2_bias
+    );
+
+    // Step 3: Codec Embedding (1024-dim)
+    struct ggml_tensor * codec_embedded = ggml_get_rows(ctx, codec_embed_weight, codec_token_ids);
+
+    // Step 4: CRITICAL - Element-wise SUM (not concatenation!)
+    struct ggml_tensor * combined = ggml_add(ctx, text_proj, codec_embedded);
+
+    // Step 5: Forward through transformer
+    return talker_forward_from_embeds(
+        ctx, combined, layer_weights, n_layers,
+        norm_weight, lm_head_weight, kv_cache, start_pos
+    );
+}
+
+// Talker forward pass with KV caching (LEGACY - for backward compatibility)
+// NOTE: This version doesn't add codec embeddings - use talker_forward_with_codec instead
 // For prefill: process all tokens, build cache
 // For decode: process single token using cache
 static struct ggml_tensor * talker_forward_cached(
@@ -574,20 +798,12 @@ static struct ggml_tensor * talker_forward_cached(
     // Token Embedding
     struct ggml_tensor * embedded = ggml_get_rows(ctx, embed_weight, token_ids);
 
-    // Text Projection (embedding_dim=2048 -> hidden_dim=1024)
-    struct ggml_tensor * proj = ggml_mul_mat(ctx, text_proj_fc1_weight, embedded);
-    struct ggml_tensor * fc1_bias = text_proj_fc1_bias;
-    if (text_proj_fc1_bias->type == GGML_TYPE_F16) {
-        fc1_bias = ggml_cast(ctx, text_proj_fc1_bias, GGML_TYPE_F32);
-    }
-    proj = ggml_add(ctx, proj, fc1_bias);
-    proj = ggml_silu(ctx, proj);
-    proj = ggml_mul_mat(ctx, text_proj_fc2_weight, proj);
-    struct ggml_tensor * fc2_bias = text_proj_fc2_bias;
-    if (text_proj_fc2_bias->type == GGML_TYPE_F16) {
-        fc2_bias = ggml_cast(ctx, text_proj_fc2_bias, GGML_TYPE_F32);
-    }
-    proj = ggml_add(ctx, proj, fc2_bias);
+    // Text Projection using helper function
+    struct ggml_tensor * proj = text_projection(
+        ctx, embedded,
+        text_proj_fc1_weight, text_proj_fc1_bias,
+        text_proj_fc2_weight, text_proj_fc2_bias
+    );
 
     // Pass through transformer blocks with caching
     struct ggml_tensor * hidden = proj;
@@ -775,6 +991,280 @@ int generate_tokens_cached(
     KVCache::destroy(kv_cache);
     printf("  Generated %d tokens total\n", current_len);
     return current_len;
+}
+
+// ============================================================================
+// Generate Tokens with Proper Embedding Combination (CORRECT IMPLEMENTATION)
+// ============================================================================
+// This is the CORRECT generation function that properly combines embeddings
+// AND captures hidden states for the code predictor.
+//
+// ARCHITECTURE (from Python reference):
+// 1. PREFILL: For each text token position:
+//    input = text_projection(text_embed) + codec_embedding(CODEC_PAD_ID)
+//
+// 2. DECODE: For each generation step:
+//    - Sample codebook_0 token from logits
+//    - Input = codec_embedding(codebook_0_token)
+//    - CAPTURE hidden state (normalized, before lm_head) for code_predictor
+//
+// Parameters:
+//   prompt_tokens: text token IDs for prefill
+//   codec_embed_weight: talker's codec embedding [3072, 1024]
+//   hidden_states_out: OUTPUT buffer for hidden states [max_codec_tokens, 1024]
+//                      If not NULL, receives hidden state for each generated codec token
+//                      These are needed by code_predictor_forward
+//   n_hidden_out: OUTPUT number of hidden states written
+//   (other params same as generate_tokens_cached)
+// ============================================================================
+int generate_tokens_with_codec(
+    const int * prompt_tokens,
+    int prompt_len,
+    struct ggml_tensor * text_embed_weight,    // [text_vocab=151936, 2048]
+    struct ggml_tensor * codec_embed_weight,   // [codec_vocab=3072, 1024] - CRITICAL!
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
+    struct ggml_tensor ** layer_weights,
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight,
+    int max_tokens,
+    float temperature,
+    int top_k,
+    float top_p,
+    int eos_token_id,
+    uint64_t * rng_state,
+    int * output_tokens,
+    float * hidden_states_out,  // OUTPUT: [max_codec_tokens, 1024] hidden states for code_predictor
+    int * n_hidden_out)         // OUTPUT: number of hidden states written
+{
+    // Configuration
+    const int num_kv_heads = 8;
+    const int head_dim = 128;
+    const int max_seq_len = max_tokens + 128;
+    
+    // Initialize hidden state count
+    int hidden_idx = 0;
+    if (n_hidden_out) *n_hidden_out = 0;
+
+    // Create KV cache
+    KVCache * kv_cache = KVCache::create(n_layers, num_kv_heads, head_dim, max_seq_len);
+    if (!kv_cache) {
+        fprintf(stderr, "generate_tokens_with_codec: Failed to create KV cache\n");
+        return 0;
+    }
+
+    // Copy prompt tokens to output
+    for (int i = 0; i < prompt_len; i++) {
+        output_tokens[i] = prompt_tokens[i];
+    }
+
+    int current_len = prompt_len;
+
+    // Memory for compute contexts
+    size_t prefill_mem = 512ULL * 1024 * 1024;
+    size_t decode_mem = 256ULL * 1024 * 1024;
+
+    // ========================================================================
+    // Phase 1: PREFILL with proper embedding combination
+    // ========================================================================
+    // For prefill, each text token position combines:
+    //   text_projection(text_embed) + codec_embedding(CODEC_PAD_ID)
+    // We capture the hidden state at the last position for the first codec token
+    // ========================================================================
+    printf("  Prefilling %d prompt tokens (with codec embedding combination)...\n", prompt_len);
+    fflush(stdout);
+    {
+        struct ggml_init_params params = {
+            .mem_size = prefill_mem,
+            .mem_buffer = nullptr,
+            .no_alloc = false,
+        };
+        struct ggml_context * ctx = ggml_init(params);
+        if (!ctx) {
+            fprintf(stderr, "generate_tokens_with_codec: Failed to create prefill context\n");
+            KVCache::destroy(kv_cache);
+            return 0;
+        }
+
+        // Create text token tensor
+        struct ggml_tensor * text_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, prompt_len);
+        memcpy(text_ids->data, prompt_tokens, prompt_len * sizeof(int32_t));
+
+        // Create codec token tensor (all CODEC_PAD_ID for prefill)
+        struct ggml_tensor * codec_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, prompt_len);
+        int32_t * codec_data = (int32_t *)codec_ids->data;
+        for (int i = 0; i < prompt_len; i++) {
+            codec_data[i] = CODEC_PAD_ID;  // Use pad token for all text positions
+        }
+
+        // Forward pass with proper embedding combination
+        struct ggml_tensor * logits = talker_forward_with_codec(
+            ctx,
+            text_ids,
+            codec_ids,
+            text_embed_weight,
+            codec_embed_weight,
+            text_proj_fc1_weight, text_proj_fc1_bias,
+            text_proj_fc2_weight, text_proj_fc2_bias,
+            layer_weights, n_layers, norm_weight, lm_head_weight,
+            kv_cache, 0  // start_pos = 0 for prefill
+        );
+
+        // Build and execute graph
+        struct ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, logits);
+        ggml_graph_compute_with_ctx(ctx, graph, 4);
+
+        // Sample first codec token
+        int vocab_size = logits->ne[0];
+        float * logits_data = (float *)logits->data;
+        float * last_logits = logits_data + vocab_size * (prompt_len - 1);
+
+        int next_token = sample_token(last_logits, vocab_size, temperature, top_k, top_p, rng_state, eos_token_id);
+        output_tokens[current_len++] = next_token;
+
+        ggml_free(ctx);
+
+        if (next_token == eos_token_id) {
+            KVCache::destroy(kv_cache);
+            printf("  Generated EOS at prefill\n");
+            if (n_hidden_out) *n_hidden_out = hidden_idx;
+            return current_len;
+        }
+    }
+
+    // ========================================================================
+    // Phase 2: DECODE with codec embeddings + hidden state capture
+    // ========================================================================
+    // For decode, the input is the codec embedding of the previously generated
+    // codec token. We capture the hidden state for each generated token to
+    // pass to the code predictor.
+    // ========================================================================
+    printf("  Decoding tokens (codec domain) with hidden state capture...\n");
+    fflush(stdout);
+    while (current_len < max_tokens) {
+        struct ggml_init_params params = {
+            .mem_size = decode_mem,
+            .mem_buffer = nullptr,
+            .no_alloc = false,
+        };
+        struct ggml_context * ctx = ggml_init(params);
+        if (!ctx) {
+            fprintf(stderr, "generate_tokens_with_codec: Failed to create decode context\n");
+            break;
+        }
+
+        // Get the last generated codec token
+        int last_codec_token = output_tokens[current_len - 1];
+
+        // Clamp to valid codec range (0-3071)
+        if (last_codec_token < 0) last_codec_token = 0;
+        if (last_codec_token >= CODEC_VOCAB_SIZE) last_codec_token = CODEC_VOCAB_SIZE - 1;
+
+        // Create single codec embedding for the last token
+        struct ggml_tensor * codec_id = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+        ((int32_t *)codec_id->data)[0] = last_codec_token;
+
+        // Get codec embedding
+        struct ggml_tensor * codec_embed = ggml_get_rows(ctx, codec_embed_weight, codec_id);
+
+        // Forward pass from embeddings with hidden state output
+        struct ggml_tensor * hidden_state = nullptr;
+        struct ggml_tensor * logits = talker_forward_from_embeds_with_hidden(
+            ctx, codec_embed, layer_weights, n_layers,
+            norm_weight, lm_head_weight, kv_cache, current_len - 1,
+            &hidden_state  // OUTPUT: capture hidden state
+        );
+
+        // Build and execute graph
+        struct ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, logits);
+        // Also ensure hidden_state is computed
+        if (hidden_state) {
+            ggml_build_forward_expand(graph, hidden_state);
+        }
+        ggml_graph_compute_with_ctx(ctx, graph, 4);
+
+        // Capture hidden state for code predictor
+        if (hidden_states_out && hidden_state) {
+            // hidden_state shape: [hidden_dim, 1] = [1024, 1]
+            // Copy to output buffer at position hidden_idx
+            const float * hs_data = (const float *)hidden_state->data;
+            memcpy(&hidden_states_out[hidden_idx * HIDDEN_DIM], hs_data, HIDDEN_DIM * sizeof(float));
+            hidden_idx++;
+        }
+
+        // Sample next token
+        int vocab_size = logits->ne[0];
+        float * logits_data = (float *)logits->data;
+
+        int next_token = sample_token(logits_data, vocab_size, temperature, top_k, top_p, rng_state, eos_token_id);
+
+        ggml_free(ctx);
+
+        output_tokens[current_len++] = next_token;
+
+        // Progress indicator
+        if (current_len % 50 == 0) {
+            printf("  Generated %d codec tokens (captured %d hidden states)...\n", 
+                   current_len - prompt_len, hidden_idx);
+            fflush(stdout);
+        }
+
+        // Check for EOS
+        if (next_token == eos_token_id) {
+            printf("  EOS reached at position %d\n", current_len);
+            break;
+        }
+    }
+
+    KVCache::destroy(kv_cache);
+    
+    // Output number of hidden states captured
+    if (n_hidden_out) *n_hidden_out = hidden_idx;
+    
+    printf("  Generated %d tokens total (%d codec tokens, %d hidden states captured)\n", 
+           current_len, current_len - prompt_len, hidden_idx);
+    return current_len;
+}
+
+// Legacy version without hidden state capture (for backward compatibility)
+int generate_tokens_with_codec(
+    const int * prompt_tokens,
+    int prompt_len,
+    struct ggml_tensor * text_embed_weight,
+    struct ggml_tensor * codec_embed_weight,
+    struct ggml_tensor * text_proj_fc1_weight,
+    struct ggml_tensor * text_proj_fc1_bias,
+    struct ggml_tensor * text_proj_fc2_weight,
+    struct ggml_tensor * text_proj_fc2_bias,
+    struct ggml_tensor ** layer_weights,
+    int n_layers,
+    struct ggml_tensor * norm_weight,
+    struct ggml_tensor * lm_head_weight,
+    int max_tokens,
+    float temperature,
+    int top_k,
+    float top_p,
+    int eos_token_id,
+    uint64_t * rng_state,
+    int * output_tokens) {
+    
+    // Call the full version without hidden state capture
+    return generate_tokens_with_codec(
+        prompt_tokens, prompt_len,
+        text_embed_weight, codec_embed_weight,
+        text_proj_fc1_weight, text_proj_fc1_bias,
+        text_proj_fc2_weight, text_proj_fc2_bias,
+        layer_weights, n_layers, norm_weight, lm_head_weight,
+        max_tokens, temperature, top_k, top_p, eos_token_id, rng_state,
+        output_tokens,
+        nullptr,  // No hidden state capture
+        nullptr
+    );
 }
 
 } // namespace model

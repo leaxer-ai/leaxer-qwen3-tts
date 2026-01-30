@@ -57,7 +57,7 @@ namespace model {
 // 0.6B model: 12 layers, hidden_size=896
 
 // Transformer block with pre-normalization
-// Architecture: RMSNorm → Attention → Add → RMSNorm → FFN → Add
+// Architecture: RMSNorm → Attention (with Q/K norms) → Add → RMSNorm → FFN → Add
 // Input: x with shape [hidden_dim, seq_len, batch]
 // Weights:
 //   - attn_norm_weight: [hidden_dim] for pre-attention RMSNorm
@@ -65,6 +65,8 @@ namespace model {
 //   - k_weight: [hidden_dim, num_kv_heads * head_dim] for key projection
 //   - v_weight: [hidden_dim, num_kv_heads * head_dim] for value projection
 //   - o_weight: [hidden_dim, num_heads * head_dim] for output projection
+//   - q_norm_weight: [head_dim] for per-head Q normalization (nullptr = skip)
+//   - k_norm_weight: [head_dim] for per-head K normalization (nullptr = skip)
 //   - ffn_norm_weight: [hidden_dim] for pre-FFN RMSNorm
 //   - w1, w2, w3: FFN weights
 // Output: [hidden_dim, seq_len, batch]
@@ -76,6 +78,8 @@ struct ggml_tensor * transformer_block(
     struct ggml_tensor * k_weight,
     struct ggml_tensor * v_weight,
     struct ggml_tensor * o_weight,
+    struct ggml_tensor * q_norm_weight,
+    struct ggml_tensor * k_norm_weight,
     struct ggml_tensor * ffn_norm_weight,
     struct ggml_tensor * ffn_w1,
     struct ggml_tensor * ffn_w2,
@@ -125,6 +129,17 @@ struct ggml_tensor * transformer_block(
     V = ggml_reshape_4d(ctx, V, kv_head_dim, num_kv_heads, seq_len, 1);
     V = ggml_cont(ctx, ggml_permute(ctx, V, 0, 2, 1, 3));
     V = ggml_reshape_3d(ctx, V, kv_head_dim, seq_len, num_kv_heads);
+
+    // Apply Q/K normalization (RMSNorm per head, applied to head_dim)
+    // This is a key component of Qwen3 attention - normalizes Q and K before computing scores
+    if (q_norm_weight != nullptr) {
+        // Q: [head_dim, seq_len, num_heads] - norm applied to head_dim dimension
+        Q = ops::rms_norm(ctx, Q, q_norm_weight, 1e-6f);
+    }
+    if (k_norm_weight != nullptr) {
+        // K: [head_dim, seq_len, num_kv_heads] - norm applied to head_dim dimension
+        K = ops::rms_norm(ctx, K, k_norm_weight, 1e-6f);
+    }
 
     // GQA: Expand K and V heads to match Q heads
     // K/V have 8 heads, Q has 16 heads, so repeat K/V heads 2x

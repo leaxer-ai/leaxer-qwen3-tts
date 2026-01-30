@@ -22,6 +22,10 @@ struct TalkerLayer {
     struct ggml_tensor * attn_v_proj_weight;     // [hidden_dim, num_kv_heads * head_dim]
     struct ggml_tensor * attn_o_proj_weight;     // [hidden_dim, num_heads * head_dim]
 
+    // Q/K normalization (RMSNorm applied to Q and K after projection)
+    struct ggml_tensor * attn_q_norm_weight;     // [head_dim] RMSNorm per head
+    struct ggml_tensor * attn_k_norm_weight;     // [head_dim] RMSNorm per head
+
     // Pre-FFN normalization
     struct ggml_tensor * post_ln_weight;         // [hidden_dim] RMSNorm weight
 
@@ -33,8 +37,13 @@ struct TalkerLayer {
 
 // Talker model weights (LLM component)
 struct TalkerWeights {
-    // Token embeddings
-    struct ggml_tensor * emb_weight;             // [vocab_size, embedding_dim]
+    // Token embeddings (text domain, 151936 vocab)
+    struct ggml_tensor * emb_weight;             // [vocab_size, embedding_dim=2048]
+
+    // Codec embeddings (codec domain, 3072 vocab including special tokens)
+    // CRITICAL: Input to talker is: text_projection(text_embed) + codec_embed
+    // Both must be 1024-dim and are SUMMED, not concatenated!
+    struct ggml_tensor * codec_embedding_weight; // [codec_vocab=3072, hidden_dim=1024]
 
     // Text projection (embedding_dim → hidden_dim)
     // Flow: input(2048) → fc1 → SiLU → fc2 → output(1024)
@@ -50,7 +59,8 @@ struct TalkerWeights {
     struct ggml_tensor * norm_weight;            // [hidden_dim] RMSNorm weight
 
     // Language model head (semantic codebook prediction)
-    struct ggml_tensor * lm_head_weight;         // [hidden_dim, semantic_vocab]
+    // Outputs logits over 3072 vocab (2048 audio codes + special tokens)
+    struct ggml_tensor * lm_head_weight;         // [hidden_dim, codec_vocab=3072]
 };
 
 // Single transformer layer for Code Predictor
@@ -64,6 +74,10 @@ struct CodePredictorLayer {
     struct ggml_tensor * attn_k_proj_weight;     // [hidden_dim, num_kv_heads * head_dim]
     struct ggml_tensor * attn_v_proj_weight;     // [hidden_dim, num_kv_heads * head_dim]
     struct ggml_tensor * attn_o_proj_weight;     // [hidden_dim, num_heads * head_dim]
+
+    // Q/K normalization (RMSNorm applied to Q and K after projection)
+    struct ggml_tensor * attn_q_norm_weight;     // [head_dim] RMSNorm per head
+    struct ggml_tensor * attn_k_norm_weight;     // [head_dim] RMSNorm per head
 
     // Pre-FFN normalization
     struct ggml_tensor * post_ln_weight;         // [hidden_dim] RMSNorm weight

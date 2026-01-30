@@ -451,16 +451,18 @@ static void convnext_block_forward(
     layer_norm(norm_out, dw_out, norm_w, norm_b, seq_len, channels);
 
     // 3. Pointwise expansion (channels -> 4*channels) with GELU
-    // pw1_w shape in GGML: [channels, 4*channels] = [in_dim, out_dim] - transposed
-    linear_transposed(pw1_out, norm_out, pw1_w, pw1_b, seq_len, channels, 4 * channels);
+    // pw1_w is stored in PyTorch layout [out_dim=4*channels, in_dim=channels]
+    // Use linear() which expects PyTorch layout, NOT linear_transposed()
+    linear(pw1_out, norm_out, pw1_w, pw1_b, seq_len, channels, 4 * channels);
 
     for (int64_t i = 0; i < seq_len * 4 * channels; i++) {
         pw1_out[i] = gelu(pw1_out[i]);
     }
 
     // 4. Pointwise projection (4*channels -> channels)
-    // pw2_w shape in GGML: [4*channels, channels] = [in_dim, out_dim] - transposed
-    linear_transposed(pw2_out, pw1_out, pw2_w, pw2_b, seq_len, 4 * channels, channels);
+    // pw2_w is stored in PyTorch layout [out_dim=channels, in_dim=4*channels]
+    // Use linear() which expects PyTorch layout, NOT linear_transposed()
+    linear(pw2_out, pw1_out, pw2_w, pw2_b, seq_len, 4 * channels, channels);
 
     // 5. Apply gamma (LayerScale) and residual
     for (int64_t t = 0; t < seq_len; t++) {
@@ -508,8 +510,27 @@ static void resblock_forward(
     float * conv2_w = convert_f16_to_f32(weights->conv2_weight);
     float * conv2_b = convert_f16_to_f32(weights->conv2_bias);
 
+    // Debug: track range for stage 3 (96 channels)
+    bool debug_stage3 = (channels == 96);
+    auto debug_range = [](const float* arr, int64_t n, const char* name) {
+        float mn = arr[0], mx = arr[0];
+        for (int64_t i = 1; i < n && i < 100000; i++) {
+            if (arr[i] < mn) mn = arr[i];
+            if (arr[i] > mx) mx = arr[i];
+        }
+        printf("    %s: [%.4f, %.4f]\n", name, mn, mx);
+    };
+
+    if (debug_stage3) {
+        debug_range(input, seq_len * channels, "input");
+    }
+
     // act1: SnakeBeta
     snake_beta(act_buf, input, act1_alpha, act1_beta, seq_len, channels);
+
+    if (debug_stage3) {
+        debug_range(act_buf, seq_len * channels, "after act1 (snake)");
+    }
 
     // conv1: kernel=7, same channels, with dilation, CAUSAL
     // PyTorch stores as [out, in, kernel] = [channels, channels, 7]
@@ -517,16 +538,32 @@ static void resblock_forward(
     conv1d_dilated(conv_buf, act_buf, conv1_w, conv1_b,
                    seq_len, channels, channels, 7, dilation, true);  // causal=true
 
+    if (debug_stage3) {
+        debug_range(conv_buf, seq_len * channels, "after conv1 (k=7)");
+    }
+
     // act2: SnakeBeta
     snake_beta(act_buf, conv_buf, act2_alpha, act2_beta, seq_len, channels);
+
+    if (debug_stage3) {
+        debug_range(act_buf, seq_len * channels, "after act2 (snake)");
+    }
 
     // conv2: kernel=1, same channels (pointwise, always dilation=1), CAUSAL
     conv1d_dilated(conv_buf, act_buf, conv2_w, conv2_b,
                    seq_len, channels, channels, 1, 1, true);  // causal=true
 
+    if (debug_stage3) {
+        debug_range(conv_buf, seq_len * channels, "after conv2 (k=1)");
+    }
+
     // Residual connection: output = conv_buf + input
     for (int64_t i = 0; i < seq_len * channels; i++) {
         output[i] = conv_buf[i] + input[i];
+    }
+
+    if (debug_stage3) {
+        debug_range(output, seq_len * channels, "after residual");
     }
 
     // Cleanup

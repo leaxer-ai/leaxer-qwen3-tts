@@ -465,6 +465,11 @@ bool load_talker_weights(
     // Load embedding weight (supports both naming conventions)
     LOAD_TENSOR_ALT(weights->emb_weight, "talker_model_emb_weight", "talker_model_text_embedding_weight");
 
+    // Load codec embedding weight (for talker - combines with projected text embeddings)
+    // CRITICAL: Input to talker is: text_projection(text_embed) + codec_embed
+    // Shape: [codec_vocab=3072, hidden_dim=1024]
+    LOAD_TENSOR(weights->codec_embedding_weight, "talker_model_codec_embedding_weight");
+
     // Load text projection weights (embedding_dim → hidden_dim)
     // Flow: input(2048) → fc1 → SiLU → fc2 → output(1024)
     LOAD_TENSOR(weights->text_proj_fc1_weight, "talker_text_projection_linear_fc1_weight");
@@ -496,6 +501,13 @@ bool load_talker_weights(
         // Load attention O projection
         snprintf(tensor_name, sizeof(tensor_name), "tk_l_%d_attn_o_proj_weight", layer);
         LOAD_TENSOR(layer_weights->attn_o_proj_weight, tensor_name);
+
+        // Load Q/K normalization weights (RMSNorm applied to Q and K after projection)
+        snprintf(tensor_name, sizeof(tensor_name), "tk_l_%d_attn_q_norm_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_q_norm_weight, tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "tk_l_%d_attn_k_norm_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_k_norm_weight, tensor_name);
 
         // Load post attention layer norm
         snprintf(tensor_name, sizeof(tensor_name), "tk_l_%d_post_ln_weight", layer);
@@ -688,6 +700,13 @@ bool load_code_predictor_weights(
         // Load attention O projection
         snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_attn_o_proj_weight", layer);
         LOAD_TENSOR(layer_weights->attn_o_proj_weight, tensor_name);
+
+        // Load Q/K normalization weights (RMSNorm applied to Q and K after projection)
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_attn_q_norm_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_q_norm_weight, tensor_name);
+
+        snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_attn_k_norm_weight", layer);
+        LOAD_TENSOR(layer_weights->attn_k_norm_weight, tensor_name);
 
         // Load post attention layer norm
         snprintf(tensor_name, sizeof(tensor_name), "talker_cp_l_%d_post_ln_weight", layer);
