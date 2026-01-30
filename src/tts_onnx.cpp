@@ -15,11 +15,29 @@
 #include <filesystem>
 #include <unordered_map>
 
-// CoreML EP support (Apple Silicon)
+// GPU Execution Provider support
 #if defined(LEAXER_USE_COREML) && defined(__APPLE__)
     #define LEAXER_TRY_COREML 1
 #else
     #define LEAXER_TRY_COREML 0
+#endif
+
+#ifdef LEAXER_USE_CUDA
+    #define LEAXER_TRY_CUDA 1
+#else
+    #define LEAXER_TRY_CUDA 0
+#endif
+
+#ifdef LEAXER_USE_ROCM
+    #define LEAXER_TRY_ROCM 1
+#else
+    #define LEAXER_TRY_ROCM 0
+#endif
+
+#ifdef LEAXER_USE_DIRECTML
+    #define LEAXER_TRY_DIRECTML 1
+#else
+    #define LEAXER_TRY_DIRECTML 0
 #endif
 
 namespace leaxer_qwen {
@@ -119,35 +137,88 @@ std::unique_ptr<Ort::Session> TTSEngine::load_model(const std::string& filename)
         opts.SetIntraOpNumThreads(4);
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         
-#if LEAXER_TRY_COREML
-        // Try to add CoreML Execution Provider for GPU acceleration on Apple Silicon
-        // This will use the new API which is cleaner and more future-proof
-        try {
-            std::unordered_map<std::string, std::string> coreml_options;
-            // Use MLProgram format for better performance (requires macOS 12+)
-            coreml_options["ModelFormat"] = "MLProgram";
-            // Use all available compute units (CPU + GPU + Neural Engine)
-            coreml_options["MLComputeUnits"] = "ALL";
-            // Allow dynamic shapes (our models may have variable sequence lengths)
-            coreml_options["RequireStaticInputShapes"] = "0";
-            
-            opts.AppendExecutionProvider("CoreML", coreml_options);
-            
-            // Log success only once (first model load)
-            static bool logged_coreml = false;
-            if (!logged_coreml) {
-                std::cerr << "[TTSEngine] CoreML Execution Provider enabled (GPU/ANE acceleration)" << std::endl;
-                logged_coreml = true;
-            }
-        } catch (const Ort::Exception& e) {
-            // CoreML EP not available in this onnxruntime build, fall back to CPU
-            static bool logged_fallback = false;
-            if (!logged_fallback) {
-                std::cerr << "[TTSEngine] CoreML EP not available, using CPU: " << e.what() << std::endl;
-                logged_fallback = true;
+        // Track which provider we successfully enabled
+        static bool logged_provider = false;
+        bool provider_added = false;
+        
+#if LEAXER_TRY_CUDA
+        // Try CUDA (NVIDIA GPU) first - typically fastest on supported hardware
+        if (!provider_added) {
+            try {
+                OrtCUDAProviderOptions cuda_options;
+                cuda_options.device_id = 0;
+                cuda_options.arena_extend_strategy = 0;
+                cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+                cuda_options.do_copy_in_default_stream = 1;
+                opts.AppendExecutionProvider_CUDA(cuda_options);
+                provider_added = true;
+                if (!logged_provider) {
+                    std::cerr << "[TTSEngine] CUDA Execution Provider enabled (NVIDIA GPU)" << std::endl;
+                }
+            } catch (const Ort::Exception& e) {
+                // CUDA EP not available
             }
         }
 #endif
+
+#if LEAXER_TRY_ROCM
+        // Try ROCm (AMD GPU)
+        if (!provider_added) {
+            try {
+                OrtROCMProviderOptions rocm_options;
+                rocm_options.device_id = 0;
+                opts.AppendExecutionProvider_ROCM(rocm_options);
+                provider_added = true;
+                if (!logged_provider) {
+                    std::cerr << "[TTSEngine] ROCm Execution Provider enabled (AMD GPU)" << std::endl;
+                }
+            } catch (const Ort::Exception& e) {
+                // ROCm EP not available
+            }
+        }
+#endif
+
+#if LEAXER_TRY_COREML
+        // Try CoreML (Apple Silicon GPU/Neural Engine)
+        if (!provider_added) {
+            try {
+                std::unordered_map<std::string, std::string> coreml_options;
+                coreml_options["ModelFormat"] = "MLProgram";
+                coreml_options["MLComputeUnits"] = "ALL";
+                coreml_options["RequireStaticInputShapes"] = "0";
+                
+                opts.AppendExecutionProvider("CoreML", coreml_options);
+                provider_added = true;
+                if (!logged_provider) {
+                    std::cerr << "[TTSEngine] CoreML Execution Provider enabled (Apple GPU/ANE)" << std::endl;
+                }
+            } catch (const Ort::Exception& e) {
+                // CoreML EP not available
+            }
+        }
+#endif
+
+#if LEAXER_TRY_DIRECTML
+        // Try DirectML (Windows GPU - works with any GPU vendor)
+        if (!provider_added) {
+            try {
+                opts.AppendExecutionProvider("DML");
+                provider_added = true;
+                if (!logged_provider) {
+                    std::cerr << "[TTSEngine] DirectML Execution Provider enabled (Windows GPU)" << std::endl;
+                }
+            } catch (const Ort::Exception& e) {
+                // DirectML EP not available
+            }
+        }
+#endif
+
+        // Log CPU fallback only once
+        if (!provider_added && !logged_provider) {
+            std::cerr << "[TTSEngine] Using CPU (no GPU acceleration available)" << std::endl;
+        }
+        
+        logged_provider = true;
         
         return std::make_unique<Ort::Session>(*env_, model_path.c_str(), opts);
     } catch (...) {

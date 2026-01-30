@@ -9,12 +9,32 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(LEAXER_QWEN_BUILD_TESTS "Build tests" ON)
 option(LEAXER_QWEN_STATIC "Build static library" ON)
 
-# CoreML acceleration (Apple Silicon only)
+# =============================================================================
+# GPU Acceleration Options
+# =============================================================================
+
+# CoreML (Apple Silicon only)
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
-    option(LEAXER_COREML "Enable CoreML Execution Provider for GPU acceleration" ON)
+    option(LEAXER_COREML "Enable CoreML Execution Provider (Apple GPU/ANE)" ON)
 else()
-    option(LEAXER_COREML "Enable CoreML Execution Provider for GPU acceleration" OFF)
+    option(LEAXER_COREML "Enable CoreML Execution Provider (Apple GPU/ANE)" OFF)
 endif()
+
+# CUDA (NVIDIA GPUs)
+option(LEAXER_CUDA "Enable CUDA Execution Provider (NVIDIA GPU)" OFF)
+
+# ROCm (AMD GPUs) 
+option(LEAXER_ROCM "Enable ROCm Execution Provider (AMD GPU)" OFF)
+
+# DirectML (Windows GPU)
+if(WIN32)
+    option(LEAXER_DIRECTML "Enable DirectML Execution Provider (Windows GPU)" OFF)
+else()
+    option(LEAXER_DIRECTML "Enable DirectML Execution Provider (Windows GPU)" OFF)
+endif()
+
+# Static linking
+option(LEAXER_STATIC "Build with static linking where possible" OFF)
 
 # =============================================================================
 # ONNX Runtime (required for this branch)
@@ -126,17 +146,46 @@ endif()
 
 target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_ONNX=1)
 
-# CoreML support
+# =============================================================================
+# GPU Execution Provider Support
+# =============================================================================
+
+# CoreML (Apple)
 if(LEAXER_COREML AND APPLE)
     target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_COREML=1)
-    # Link CoreML and Foundation frameworks
     target_link_libraries(leaxer_qwen_lib PUBLIC
         "-framework CoreML"
         "-framework Foundation"
     )
-    message(STATUS "CoreML Execution Provider: ENABLED")
-else()
-    message(STATUS "CoreML Execution Provider: DISABLED")
+endif()
+
+# CUDA (NVIDIA)
+if(LEAXER_CUDA)
+    target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_CUDA=1)
+    # Note: CUDA EP is loaded dynamically by ONNX Runtime if available
+    # No extra linking needed - just needs onnxruntime built with CUDA
+endif()
+
+# ROCm (AMD)
+if(LEAXER_ROCM)
+    target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_ROCM=1)
+    # Note: ROCm EP is loaded dynamically by ONNX Runtime if available
+endif()
+
+# DirectML (Windows)
+if(LEAXER_DIRECTML AND WIN32)
+    target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_DIRECTML=1)
+endif()
+
+# Static linking configuration
+if(LEAXER_STATIC)
+    if(MSVC)
+        # Use static CRT on Windows
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    elseif(NOT APPLE)
+        # Linux: add -static flag (doesn't work on macOS)
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+    endif()
 endif()
 
 # =============================================================================
@@ -196,8 +245,15 @@ install(TARGETS leaxer_qwen_lib DESTINATION lib)
 # =============================================================================
 
 message(STATUS "")
-message(STATUS "leaxer-qwen3-tts v${PROJECT_VERSION} (ONNX)")
-message(STATUS "  Build tests:  ${LEAXER_QWEN_BUILD_TESTS}")
-message(STATUS "  ONNX Runtime: ${ONNXRUNTIME_PREFIX}")
-message(STATUS "  CoreML EP:    ${LEAXER_COREML}")
+message(STATUS "leaxer-qwen3-tts v${PROJECT_VERSION}")
+message(STATUS "========================================")
+message(STATUS "  Build tests:   ${LEAXER_QWEN_BUILD_TESTS}")
+message(STATUS "  Static build:  ${LEAXER_STATIC}")
+message(STATUS "  ONNX Runtime:  ${ONNXRUNTIME_PREFIX}")
+message(STATUS "")
+message(STATUS "  GPU Acceleration:")
+message(STATUS "    CoreML (Apple):   ${LEAXER_COREML}")
+message(STATUS "    CUDA (NVIDIA):    ${LEAXER_CUDA}")
+message(STATUS "    ROCm (AMD):       ${LEAXER_ROCM}")
+message(STATUS "    DirectML (Win):   ${LEAXER_DIRECTML}")
 message(STATUS "")
