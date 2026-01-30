@@ -3,6 +3,8 @@
 
 #include "tts_onnx.h"
 #include "io/tokenizer.h"
+#include "io/wav_reader.h"
+#include "io/mel.h"
 #include <onnxruntime/onnxruntime_cxx_api.h>
 
 #include <algorithm>
@@ -15,6 +17,26 @@
 namespace leaxer_qwen {
 
 namespace fs = std::filesystem;
+
+// ===========================================================================
+// Speaker parsing
+// ===========================================================================
+
+Speaker parse_speaker(const std::string& name) {
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    
+    if (lower == "serena") return Speaker::Serena;
+    if (lower == "vivian") return Speaker::Vivian;
+    if (lower == "uncle_fu" || lower == "unclefu") return Speaker::Uncle_Fu;
+    if (lower == "dylan") return Speaker::Dylan;
+    if (lower == "eric") return Speaker::Eric;
+    if (lower == "ryan") return Speaker::Ryan;
+    if (lower == "aiden") return Speaker::Aiden;
+    if (lower == "ono_anna" || lower == "onoanna") return Speaker::Ono_Anna;
+    if (lower == "sohee") return Speaker::Sohee;
+    return Speaker::None;
+}
 
 // ===========================================================================
 // KVCache
@@ -124,6 +146,147 @@ std::vector<float> TTSEngine::synthesize(const std::string& text,
     return synthesize_tokens(token_ids, lang, params);
 }
 
+std::vector<float> TTSEngine::synthesize_clone(const std::string& text,
+                                                const std::string& ref_audio_path,
+                                                Language lang,
+                                                const SamplingParams& params) {
+    if (!ready_) return {};
+    if (!speaker_encoder_) {
+        std::cerr << "[TTSEngine] Speaker encoder not available" << std::endl;
+        return {};
+    }
+    
+    // Extract speaker embedding from reference audio
+    auto speaker_embed = extract_speaker_embedding(ref_audio_path);
+    if (speaker_embed.empty()) {
+        std::cerr << "[TTSEngine] Failed to extract speaker embedding" << std::endl;
+        return {};
+    }
+    
+    // Build token sequence
+    std::vector<int64_t> token_ids;
+    token_ids.push_back(config::IM_START);
+    token_ids.push_back(config::ASSISTANT);
+    token_ids.push_back(config::TTS_BOS);
+    
+    if (io::is_tokenizer_ready()) {
+        for (int32_t t : io::tokenize(text)) {
+            token_ids.push_back(static_cast<int64_t>(t));
+        }
+    } else {
+        std::cerr << "[TTSEngine] Tokenizer not ready" << std::endl;
+        return {};
+    }
+    
+    token_ids.push_back(config::TTS_EOS);
+    token_ids.push_back(config::IM_END);
+    
+    // Synthesize with speaker embedding
+    try {
+        kv_cache_.clear();
+        auto prompt_embeds = build_prompt_embeddings(token_ids, lang, speaker_embed);
+        auto audio_codes = generate_codes(prompt_embeds, params);
+        if (audio_codes.empty()) return {};
+        
+        std::vector<int64_t> codes_flat;
+        codes_flat.reserve(audio_codes.size() * 16);
+        for (const auto& frame : audio_codes) {
+            for (int i = 0; i < 16; ++i) {
+                codes_flat.push_back(frame[i]);
+            }
+        }
+        return run_vocoder(codes_flat, static_cast<int64_t>(audio_codes.size()));
+    } catch (const std::exception& e) {
+        std::cerr << "[TTSEngine] Synthesis error: " << e.what() << std::endl;
+        return {};
+    }
+}
+
+std::vector<float> TTSEngine::synthesize_speaker(const std::string& text,
+                                                  Speaker speaker,
+                                                  Language lang,
+                                                  const SamplingParams& params) {
+    // For preset speakers, we need CustomVoice model with spk_id config
+    // Currently just fall back to regular synthesis
+    // TODO: Implement when CustomVoice ONNX exports are available
+    std::cerr << "[TTSEngine] Preset speakers require CustomVoice model (not yet supported)" << std::endl;
+    return synthesize(text, lang, params);
+}
+
+std::vector<float> TTSEngine::extract_speaker_embedding(const std::string& audio_path) {
+    if (!speaker_encoder_) return {};
+    
+    // Load and resample audio to 24kHz
+    int sample_rate;
+    auto audio = io::read_wav(audio_path, sample_rate);
+    if (audio.empty()) {
+        std::cerr << "[TTSEngine] Failed to read audio: " << audio_path << std::endl;
+        return {};
+    }
+    
+    if (sample_rate != config::SAMPLE_RATE) {
+        audio = io::resample(audio, sample_rate, config::SAMPLE_RATE);
+    }
+    
+    // Extract mel spectrogram
+    io::MelConfig mel_config;
+    mel_config.sample_rate = config::SAMPLE_RATE;
+    mel_config.n_fft = 1024;
+    mel_config.hop_size = 256;
+    mel_config.win_size = 1024;
+    mel_config.num_mels = 128;
+    mel_config.fmin = 0.0f;
+    mel_config.fmax = 12000.0f;
+    
+    io::MelExtractor mel_extractor(mel_config);
+    auto mel = mel_extractor.extract(audio);
+    if (mel.empty()) {
+        std::cerr << "[TTSEngine] Failed to extract mel spectrogram" << std::endl;
+        return {};
+    }
+    
+    // Run speaker encoder
+    return run_speaker_encoder(mel);
+}
+
+std::vector<float> TTSEngine::run_speaker_encoder(const std::vector<float>& mel) {
+    // mel is [num_mels, num_frames] row-major from MelExtractor
+    // speaker_encoder expects [1, num_frames, num_mels]
+    // So we need to transpose
+    const int64_t num_mels = 128;
+    const int64_t num_frames = static_cast<int64_t>(mel.size() / num_mels);
+    
+    // Transpose from [num_mels, num_frames] to [num_frames, num_mels]
+    std::vector<float> mel_transposed(mel.size());
+    for (int64_t m = 0; m < num_mels; ++m) {
+        for (int64_t t = 0; t < num_frames; ++t) {
+            mel_transposed[t * num_mels + m] = mel[m * num_frames + t];
+        }
+    }
+    
+    std::array<int64_t, 3> shape = {1, num_frames, num_mels};
+    
+    Ort::Value input = Ort::Value::CreateTensor<float>(
+        *memory_info_, mel_transposed.data(), mel_transposed.size(),
+        shape.data(), shape.size());
+    
+    // Get input/output names from model
+    Ort::AllocatorWithDefaultOptions allocator;
+    auto input_name = speaker_encoder_->GetInputNameAllocated(0, allocator);
+    auto output_name = speaker_encoder_->GetOutputNameAllocated(0, allocator);
+    const char* in[] = {input_name.get()};
+    const char* out[] = {output_name.get()};
+    
+    auto outputs = speaker_encoder_->Run(Ort::RunOptions{nullptr}, in, &input, 1, out, 1);
+    
+    auto& output_tensor = outputs[0];
+    float* data = output_tensor.GetTensorMutableData<float>();
+    auto tensor_info = output_tensor.GetTensorTypeAndShapeInfo();
+    size_t total = tensor_info.GetElementCount();
+    
+    return std::vector<float>(data, data + total);
+}
+
 std::vector<float> TTSEngine::synthesize_tokens(const std::vector<int64_t>& token_ids,
                                                  Language lang,
                                                  const SamplingParams& params) {
@@ -162,8 +325,10 @@ std::vector<float> TTSEngine::synthesize_tokens(const std::vector<int64_t>& toke
 // ===========================================================================
 
 std::vector<float> TTSEngine::build_prompt_embeddings(const std::vector<int64_t>& input_ids,
-                                                       Language lang) {
+                                                       Language lang,
+                                                       const std::vector<float>& speaker_embed) {
     constexpr int H = config::HIDDEN_SIZE;
+    const bool has_speaker = !speaker_embed.empty();
     
     auto slice = [](const std::vector<float>& v, size_t start, size_t end) {
         return std::vector<float>(v.begin() + start, v.begin() + end);
@@ -197,12 +362,25 @@ std::vector<float> TTSEngine::build_prompt_embeddings(const std::vector<int64_t>
     
     auto codec_embeds = run_codec_embed_batch(codec_prefill);
     
+    // Insert speaker embedding if provided (between prefill and BOS)
+    if (has_speaker) {
+        // Insert speaker embedding before the last element (BOS)
+        size_t insert_pos = (codec_prefill.size() - 1) * H;
+        std::vector<float> new_embeds;
+        new_embeds.reserve(codec_embeds.size() + H);
+        new_embeds.insert(new_embeds.end(), codec_embeds.begin(), codec_embeds.begin() + insert_pos);
+        new_embeds.insert(new_embeds.end(), speaker_embed.begin(), speaker_embed.end());
+        new_embeds.insert(new_embeds.end(), codec_embeds.begin() + insert_pos, codec_embeds.end());
+        codec_embeds = std::move(new_embeds);
+    }
+    
     // 3. Role embedding (first 3 tokens: IM_START, ASSISTANT, TTS_BOS)
     std::vector<int64_t> role_ids(input_ids.begin(), input_ids.begin() + 3);
     auto role_embed = run_text_project(role_ids);
     
     // 4. Build pad block to align with codec embeddings
     int pad_count = static_cast<int>(codec_prefill.size()) - 2;
+    if (has_speaker) pad_count += 1;  // Account for speaker embedding position
     std::vector<float> pad_block;
     pad_block.reserve(pad_count * H);
     for (int i = 0; i < pad_count; ++i) {

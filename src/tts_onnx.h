@@ -72,6 +72,23 @@ enum class Language {
     Korean
 };
 
+// Preset speakers (CustomVoice models)
+enum class Speaker {
+    None,       // No preset speaker
+    Serena,     // Chinese - warm, gentle young female
+    Vivian,     // Chinese - bright, edgy young female
+    Uncle_Fu,   // Chinese - seasoned male, low mellow
+    Dylan,      // Chinese (Beijing) - youthful male
+    Eric,       // Chinese (Sichuan) - lively male, husky
+    Ryan,       // English - dynamic male
+    Aiden,      // English - sunny American male
+    Ono_Anna,   // Japanese - playful female
+    Sohee       // Korean - warm female
+};
+
+// Parse speaker name string to enum
+Speaker parse_speaker(const std::string& name);
+
 // Sampling parameters
 struct SamplingParams {
     float temperature = config::DEFAULT_TEMPERATURE;
@@ -108,12 +125,34 @@ public:
         const SamplingParams& params = SamplingParams()
     );
     
+    // Voice clone: synthesize using reference audio
+    std::vector<float> synthesize_clone(
+        const std::string& text,
+        const std::string& ref_audio_path,
+        Language lang = Language::Auto,
+        const SamplingParams& params = SamplingParams()
+    );
+    
+    // Preset speaker: synthesize using preset voice
+    std::vector<float> synthesize_speaker(
+        const std::string& text,
+        Speaker speaker,
+        Language lang = Language::Auto,
+        const SamplingParams& params = SamplingParams()
+    );
+    
     // Low-level: synthesize from pre-tokenized input
     std::vector<float> synthesize_tokens(
         const std::vector<int64_t>& token_ids,
         Language lang = Language::Auto,
         const SamplingParams& params = SamplingParams()
     );
+    
+    // Extract speaker embedding from audio file
+    std::vector<float> extract_speaker_embedding(const std::string& audio_path);
+    
+    // Check if speaker encoder is available
+    bool has_speaker_encoder() const { return speaker_encoder_ != nullptr; }
     
     bool is_ready() const { return ready_; }
     const std::string& get_error() const { return error_msg_; }
@@ -163,9 +202,13 @@ private:
     std::vector<float> run_vocoder(const std::vector<int64_t>& audio_codes,
                                    int64_t codes_length);
     
+    // Speaker encoder
+    std::vector<float> run_speaker_encoder(const std::vector<float>& mel);
+    
     // Generation
     std::vector<float> build_prompt_embeddings(const std::vector<int64_t>& input_ids,
-                                               Language lang);
+                                               Language lang,
+                                               const std::vector<float>& speaker_embed = {});
     std::vector<std::array<int64_t, 16>> generate_codes(const std::vector<float>& prompt_embeds,
                                                         const SamplingParams& params);
     std::array<int64_t, 15> predict_subcodes(int64_t code0, const SamplingParams& params);

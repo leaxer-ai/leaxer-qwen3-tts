@@ -1,6 +1,6 @@
 # leaxer-qwen3-tts
 
-Single binary C++, Text to Speech inference for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) running on top of ONNX Runtime.
+Single binary, C++ implementation of [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) running on top of ONNX Runtime.
 
 ## Usage
 
@@ -91,10 +91,33 @@ Text → BPE Tokenizer → Talker (prefill/decode) → Code Predictor → Vocode
 
 The model generates 16 audio codebooks per frame at 12Hz, then the vocoder upsamples to 24kHz audio.
 
+## Voice Clone
+
+Clone any voice from a 3-second reference audio:
+
+```bash
+leaxer-qwen3-tts -m onnx/onnx_kv_06b -p "Hello world" --ref voice_sample.wav -o output.wav
+```
+
+The reference audio should be:
+- WAV format (8/16/24/32-bit PCM or float)
+- At least 3 seconds of clear speech
+- Will be resampled to 24kHz internally
+
+## Roadmap
+
+| Feature | Requires | Status |
+|---------|----------|--------|
+| Voice clone (`--ref`) | 0.6B-Base | Done |
+| Preset speakers (`--speaker`) | 0.6B-CustomVoice | Waiting for ONNX export |
+| Voice instructions (`--instruct`) | 1.7B-VoiceDesign | Waiting for ONNX export |
+
+Currently only 0.6B-Base ONNX models are available from [zukky's exports](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL).
+
 ## Credits
 
 - [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba
-- [zukky/Qwen3-TTS-ONNX-DLL](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL) for ONNX exports, big thanks to Mr. Daishi Suzuki (Zukky)!
+- [zukky/Qwen3-TTS-ONNX-DLL](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL) for ONNX exports, big thanks to Mr. Daishi Suzuki (zukky)!
 
 ## License
 

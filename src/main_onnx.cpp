@@ -65,13 +65,15 @@ static void print_usage(const char* prog) {
     printf("  -p, --prompt TEXT     Text to synthesize (required)\n");
     printf("  -o, --output PATH     Output WAV file (default: output.wav)\n");
     printf("  --lang LANG           Language: auto, en, zh, ja, ko (default: auto)\n");
+    printf("  --ref PATH            Reference audio for voice clone (3s WAV)\n");
     printf("  --temp FLOAT          Temperature (default: 0.8)\n");
     printf("  --top-k N             Top-k sampling (default: 50)\n");
     printf("  --top-p FLOAT         Top-p sampling (default: 0.95)\n");
     printf("  --max-tokens N        Max tokens (default: 2048)\n");
     printf("  -h, --help            Show this help\n");
-    printf("\nExample:\n");
+    printf("\nExamples:\n");
     printf("  %s -m onnx/onnx_kv_06b -p \"Hello world\" -o hello.wav\n", prog);
+    printf("  %s -m onnx/onnx_kv_06b -p \"Hello\" --ref voice.wav -o cloned.wav\n", prog);
 }
 
 static leaxer_qwen::Language parse_language(const char* lang) {
@@ -88,6 +90,7 @@ int main(int argc, char** argv) {
     const char* prompt = nullptr;
     const char* output_path = "output.wav";
     const char* lang_str = "auto";
+    const char* ref_audio = nullptr;
     float temperature = 0.8f;
     int top_k = 50;
     float top_p = 0.95f;
@@ -107,6 +110,8 @@ int main(int argc, char** argv) {
             output_path = argv[++i];
         } else if (arg == "--lang" && i + 1 < argc) {
             lang_str = argv[++i];
+        } else if (arg == "--ref" && i + 1 < argc) {
+            ref_audio = argv[++i];
         } else if (arg == "--temp" && i + 1 < argc) {
             temperature = std::atof(argv[++i]);
         } else if (arg == "--top-k" && i + 1 < argc) {
@@ -133,6 +138,7 @@ int main(int argc, char** argv) {
     
     printf("Model: %s\n", model_dir);
     printf("Text: %s\n", prompt);
+    if (ref_audio) printf("Reference: %s\n", ref_audio);
     printf("Language: %s\n", lang_str);
     printf("Output: %s\n\n", output_path);
     
@@ -156,7 +162,16 @@ int main(int argc, char** argv) {
     
     // Synthesize
     printf("Synthesizing...\n");
-    auto audio = engine.synthesize(prompt, lang, params);
+    std::vector<float> audio;
+    if (ref_audio) {
+        if (!engine.has_speaker_encoder()) {
+            fprintf(stderr, "Error: speaker encoder not available for voice clone\n");
+            return 1;
+        }
+        audio = engine.synthesize_clone(prompt, ref_audio, lang, params);
+    } else {
+        audio = engine.synthesize(prompt, lang, params);
+    }
     
     if (audio.empty()) {
         fprintf(stderr, "Error: synthesis failed\n");

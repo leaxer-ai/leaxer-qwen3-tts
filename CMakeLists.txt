@@ -74,10 +74,12 @@ include_directories(
 # Source files
 # =============================================================================
 
-# IO sources (tokenizer, wav writer)
+# IO sources (tokenizer, wav reader/writer, mel spectrogram)
 set(IO_SOURCES
     src/io/tokenizer.cpp
     src/io/wav_writer.cpp
+    src/io/wav_reader.cpp
+    src/io/mel.cpp
 )
 
 # TTS engine sources
