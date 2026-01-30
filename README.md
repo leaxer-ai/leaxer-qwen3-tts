@@ -86,7 +86,7 @@ Also needs tokenizer files in `../models/Qwen3-TTS-12Hz-0.6B-Base/`:
 ```
 Text → BPE Tokenizer → Talker (prefill/decode) → Code Predictor → Vocoder → WAV
                               ↓                        ↓
-                        KV Cache               Codebooks 1-15
+                           KV Cache              Codebooks 1-15
 ```
 
 The model generates 16 audio codebooks per frame at 12Hz, then the vocoder upsamples to 24kHz audio.
