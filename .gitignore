@@ -16,7 +16,9 @@ cmake-build-*/
 *.safetensors
 *.pt
 *.pth
+*.onnx
 models/
+hf_onnx_bundle/
 
 # Test fixtures (generated)
 tests/fixtures/*.bin
