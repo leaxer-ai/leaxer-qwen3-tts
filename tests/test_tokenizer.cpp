@@ -12,9 +12,9 @@ namespace fs = std::filesystem;
 
 // Search paths for vocab/merges files (relative to build directory)
 const std::vector<std::string> MODEL_SEARCH_PATHS = {
-    "../hf_onnx_bundle/models/Qwen3-TTS-12Hz-0.6B-Base",
-    "../../hf_onnx_bundle/models/Qwen3-TTS-12Hz-0.6B-Base",
-    "../models/Qwen3-TTS-12Hz-0.6B-Base",
+    "../onnx/models/Qwen3-TTS-12Hz-0.6B-Base",
+    "../../onnx/models/Qwen3-TTS-12Hz-0.6B-Base",
+    "../onnx/models/Qwen3-TTS-12Hz-0.6B-Base",
 };
 
 std::string findModelDir() {

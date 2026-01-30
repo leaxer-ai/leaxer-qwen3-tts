@@ -17,7 +17,7 @@ cmake-build-*/
 *.pt
 *.pth
 *.onnx
-models/
+onnx/
 hf_onnx_bundle/
 
 # Test fixtures (generated)
@@ -49,3 +49,4 @@ Thumbs.db
 
 # Todo
 .todo/
+DEVELOPMENT.md

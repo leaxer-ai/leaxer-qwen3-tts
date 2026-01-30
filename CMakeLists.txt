@@ -80,16 +80,15 @@ set(IO_SOURCES
     src/io/wav_writer.cpp
 )
 
-# ONNX sources
-set(ONNX_SOURCES
-    src/onnx/onnx_session.cpp
+# TTS engine sources
+set(TTS_SOURCES
     src/tts_onnx.cpp
 )
 
 # All library sources
 set(LIB_SOURCES
     ${IO_SOURCES}
-    ${ONNX_SOURCES}
+    ${TTS_SOURCES}
 )
 
 # =============================================================================
