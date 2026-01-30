@@ -113,7 +113,8 @@ bool test_tokenize_world() {
 }
 
 bool test_tokenize_hello_world() {
-    // Test 'Hello world' - Python reference: [9707, 32, 14615]
+    // Test 'Hello world' - Python reference: [9707, 1879]
+    // Note: ' world' (with space) is token 1879 in GPT-2/Qwen byte-level BPE
     auto tokens = leaxer_qwen::io::tokenize("Hello world");
     printf("    'Hello world' tokenized to %zu tokens: ", tokens.size());
     for (size_t i = 0; i < tokens.size() && i < 10; i++) {
@@ -121,10 +122,9 @@ bool test_tokenize_hello_world() {
     }
     printf("\n");
 
-    TEST_ASSERT(tokens.size() == 3, "Hello world should produce 3 tokens");
+    TEST_ASSERT(tokens.size() == 2, "Hello world should produce 2 tokens");
     TEST_ASSERT(tokens[0] == 9707, "First token (Hello) should be 9707");
-    TEST_ASSERT(tokens[1] == 32, "Second token (space) should be 32");
-    TEST_ASSERT(tokens[2] == 14615, "Third token (world) should be 14615");
+    TEST_ASSERT(tokens[1] == 1879, "Second token ( world) should be 1879");
 
     TEST_PASS("Hello world tokenization");
     return true;

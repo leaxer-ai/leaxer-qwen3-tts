@@ -1,0 +1,43 @@
+{
+  "_comment": "Weight mapping from HuggingFace to GGUF names",
+  "model.embed_tokens.weight": {
+    "gguf_name": "token_embd.weight",
+    "shape": "vocab_size x hidden_size"
+  },
+  "model.layers.{i}.self_attn.q_proj.weight": {
+    "gguf_name": "blk.{i}.attn_q.weight",
+    "shape": "hidden_size x hidden_size"
+  },
+  "model.layers.{i}.self_attn.k_proj.weight": {
+    "gguf_name": "blk.{i}.attn_k.weight",
+    "shape": "kv_hidden x hidden_size"
+  },
+  "model.layers.{i}.self_attn.v_proj.weight": {
+    "gguf_name": "blk.{i}.attn_v.weight",
+    "shape": "kv_hidden x hidden_size"
+  },
+  "model.layers.{i}.self_attn.o_proj.weight": {
+    "gguf_name": "blk.{i}.attn_output.weight",
+    "shape": "hidden_size x hidden_size"
+  },
+  "model.layers.{i}.mlp.gate_proj.weight": {
+    "gguf_name": "blk.{i}.ffn_gate.weight",
+    "shape": "intermediate x hidden_size"
+  },
+  "model.layers.{i}.mlp.up_proj.weight": {
+    "gguf_name": "blk.{i}.ffn_up.weight",
+    "shape": "intermediate x hidden_size"
+  },
+  "model.layers.{i}.mlp.down_proj.weight": {
+    "gguf_name": "blk.{i}.ffn_down.weight",
+    "shape": "hidden_size x intermediate"
+  },
+  "model.layers.{i}.input_layernorm.weight": {
+    "gguf_name": "blk.{i}.attn_norm.weight",
+    "shape": "hidden_size"
+  },
+  "model.layers.{i}.post_attention_layernorm.weight": {
+    "gguf_name": "blk.{i}.ffn_norm.weight",
+    "shape": "hidden_size"
+  }
+}

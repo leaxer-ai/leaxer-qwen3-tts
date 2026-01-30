@@ -22,6 +22,76 @@ struct PairHash {
     }
 };
 
+// GPT-2 style byte encoder
+// Maps bytes 0-255 to Unicode characters to avoid control chars in vocab
+// This is the standard byte_encoder from GPT-2/Qwen tokenizers
+static std::string byte_to_unicode(unsigned char b) {
+    // Printable ASCII range: 33-126 (! to ~)
+    // Extended Latin: 161-172 (¡ to ¬), 174-255 (® to ÿ)
+    // These map to themselves
+    if ((b >= 33 && b <= 126) ||
+        (b >= 161 && b <= 172) ||
+        (b >= 174 && b <= 255)) {
+        return std::string(1, static_cast<char>(b));
+    }
+    
+    // Other bytes (0-32, 127-160, 173) map to U+0100 + offset
+    // We need to find the offset for this byte
+    static const unsigned char direct_bytes[] = {
+        33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,
+        65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,
+        97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,
+        161,162,163,164,165,166,167,168,169,170,171,172,
+        174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,
+        192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,
+        208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,
+        224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,
+        240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
+    };
+    
+    int offset = 0;
+    bool is_direct = false;
+    for (size_t i = 0; i < sizeof(direct_bytes); i++) {
+        if (direct_bytes[i] == b) {
+            is_direct = true;
+            break;
+        }
+    }
+    
+    if (!is_direct) {
+        // Count how many non-direct bytes come before this one
+        for (int i = 0; i < b; i++) {
+            bool found = false;
+            for (size_t j = 0; j < sizeof(direct_bytes); j++) {
+                if (direct_bytes[j] == i) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) offset++;
+        }
+        
+        // Encode as UTF-8 for U+0100 + offset
+        int codepoint = 0x100 + offset;
+        char utf8[4];
+        utf8[0] = static_cast<char>(0xC0 | (codepoint >> 6));
+        utf8[1] = static_cast<char>(0x80 | (codepoint & 0x3F));
+        utf8[2] = '\0';
+        return std::string(utf8);
+    }
+    
+    return std::string(1, static_cast<char>(b));
+}
+
+// Encode a string's bytes using GPT-2 byte encoding
+static std::string encode_bytes_to_bpe(const std::string& text) {
+    std::string result;
+    for (unsigned char c : text) {
+        result += byte_to_unicode(c);
+    }
+    return result;
+}
+
 // Helper to parse hex digit
 static int hex_digit(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -284,15 +354,20 @@ public:
 
     // Pre-tokenize text using regex to split into chunks before BPE
     std::vector<std::string> pre_tokenize(const std::string& text) {
-        // Simplified GPT-2 style regex pattern
-        // Matches: contractions, letters+, numbers, spaces, special chars
-        // Pattern: 's|'t|'re|'ve|'m|'ll|'d|[A-Za-z]+|[0-9]|[^\s\w]+|\s+
+        // Qwen2/GPT-2 style regex pattern (simplified)
+        // Key: spaces are attached to the FOLLOWING word, not separate
+        // Pattern matches (in order):
+        //   1. Contractions: 's, 't, 're, 've, 'm, 'll, 'd
+        //   2. Optional space + letters (captures " world" as one chunk)
+        //   3. Numbers
+        //   4. Special chars/punctuation (optional leading space)
+        //   5. Standalone whitespace (for multiple spaces, tabs, etc.)
         std::regex pattern(
             "'s|'t|'re|'ve|'m|'ll|'d|"  // Contractions
-            "[A-Za-z]+|"                 // Words (letters)
-            "[0-9]|"                     // Single digits
-            "[^\\s\\w]+|"                // Special chars/punctuation
-            "\\s+"                       // Whitespace
+            " ?[A-Za-z]+|"               // Optional space + letters (key fix!)
+            "[0-9]+|"                    // Numbers (one or more digits)
+            " ?[^\\s\\w]+|"              // Optional space + special chars
+            "\\s+"                       // Remaining whitespace
         );
 
         std::vector<std::string> chunks;
@@ -313,10 +388,11 @@ public:
             return {};
         }
 
-        // Start with individual bytes
+        // Start with individual bytes, encoded using GPT-2 byte encoding
+        // This converts bytes like space (0x20) to Ġ (U+0120)
         std::vector<std::string> word;
         for (unsigned char c : chunk) {
-            word.push_back(std::string(1, static_cast<char>(c)));
+            word.push_back(byte_to_unicode(c));
         }
 
         if (word.size() == 1) {
