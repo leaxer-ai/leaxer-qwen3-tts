@@ -14,6 +14,13 @@ leaxer-qwen3-tts -m models/ -p "Hello world" -o output.wav
 
 🚧 **Work in Progress** — Refactoring to ONNX Runtime
 
+### Approach
+
+Using ONNX Runtime for reliable inference:
+- Pre-exported ONNX models handle M-RoPE, attention, KV-cache correctly
+- C++ orchestrates the generation loop
+- No manual tensor operations = fewer bugs
+
 ## Building
 
 ```bash
@@ -61,7 +68,7 @@ Text → Tokenizer → Talker ONNX → Code Predictor ONNX → Vocoder ONNX → 
 
 ## License
 
-Apache 2.0
+MIT
 
 ---
 
