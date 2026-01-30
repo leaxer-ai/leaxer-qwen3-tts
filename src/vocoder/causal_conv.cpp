@@ -6,9 +6,8 @@
 #include <cstring>
 
 namespace leaxer_qwen {
-namespace vocoder {
 
-// Forward declaration from conv1d.cpp
+// Forward declaration from conv1d.cpp (in leaxer_qwen::ops namespace)
 namespace ops {
 struct ggml_tensor * conv1d_causal(
     struct ggml_context * ctx,
@@ -19,6 +18,8 @@ struct ggml_tensor * conv1d_causal(
     int dilation
 );
 } // namespace ops
+
+namespace vocoder {
 
 // Causal ConvNet projection layer
 // Projects RVQ output from codebook_dim to hidden_dim
