@@ -32,28 +32,39 @@ leaxer-qwen3-tts -m onnx_kv_06b -p "Hello" --temp 0.7 --top-k 30 --top-p 0.9
 ### Requirements
 - CMake 3.14+
 - C++17 compiler
-- ONNX Runtime
+- ONNX Runtime (user-provided)
 
-### macOS (Homebrew)
+### Build
 ```bash
-brew install onnxruntime cmake
+# Download ONNX Runtime from https://github.com/microsoft/onnxruntime/releases
+# Extract to a directory, then:
 
-git clone https://github.com/user/leaxer-qwen3-tts
-cd leaxer-qwen3-tts
-cmake -B build
+cmake -B build -DONNXRUNTIME_DIR=/path/to/onnxruntime
 cmake --build build -j
 
 ./build/leaxer-qwen3-tts --help
 ```
 
-### Linux
+### macOS (Homebrew)
 ```bash
-# Install ONNX Runtime (see https://onnxruntime.ai/)
-sudo apt install cmake
-
-cmake -B build
+brew install onnxruntime cmake
+cmake -B build -DONNXRUNTIME_DIR=$(brew --prefix onnxruntime)
 cmake --build build -j
 ```
+
+### GPU Acceleration
+```bash
+# CoreML (macOS, requires ONNX Runtime with CoreML support)
+cmake -B build -DONNXRUNTIME_DIR=/path/to/onnxruntime -DLEAXER_COREML=ON
+
+# CUDA (NVIDIA)
+cmake -B build -DONNXRUNTIME_DIR=/path/to/onnxruntime -DLEAXER_CUDA=ON
+
+# ROCm (AMD)
+cmake -B build -DONNXRUNTIME_DIR=/path/to/onnxruntime -DLEAXER_ROCM=ON
+```
+
+Note: GPU acceleration requires ONNX Runtime built with the corresponding execution provider. The default Microsoft releases include CoreML for macOS.
 
 ## Models
 
