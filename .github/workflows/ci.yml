@@ -48,14 +48,19 @@ jobs:
           cd onnxruntime
           if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
             curl -L -o ort.zip "${{ matrix.ort_url }}"
-            unzip ort.zip
+            unzip -q ort.zip
+            rm ort.zip
           else
             curl -L -o ort.tgz "${{ matrix.ort_url }}"
             tar xzf ort.tgz
             rm ort.tgz
           fi
-          mv onnxruntime-*/* .
-          rmdir onnxruntime-*
+          # Move contents from extracted directory
+          EXTRACTED_DIR=$(ls -d onnxruntime-* 2>/dev/null | head -1)
+          if [[ -n "$EXTRACTED_DIR" && -d "$EXTRACTED_DIR" ]]; then
+            mv "$EXTRACTED_DIR"/* .
+            rmdir "$EXTRACTED_DIR"
+          fi
           # Create symlink for versioned library (not needed on Windows)
           if [[ -n "${{ matrix.ort_link }}" ]]; then
             ln -sf "${{ matrix.ort_lib }}" "lib/${{ matrix.ort_link }}"
@@ -85,78 +90,3 @@ jobs:
         run: |
           cd build
           ctest --output-on-failure -C Debug
-
-  build:
-    needs: test
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: linux-x64
-            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz
-            ort_lib: libonnxruntime.so.1.20.0
-            ort_link: libonnxruntime.so
-            binary: leaxer-qwen3-tts
-          - os: macos-latest
-            artifact: macos-arm64
-            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-osx-arm64-1.20.0.tgz
-            ort_lib: libonnxruntime.1.20.0.dylib
-            ort_link: libonnxruntime.dylib
-            binary: leaxer-qwen3-tts
-          - os: windows-2022
-            artifact: windows-x64
-            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-win-x64-1.20.0.zip
-            ort_lib: onnxruntime.dll
-            ort_link: ""
-            binary: leaxer-qwen3-tts.exe
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache ONNX Runtime
-        uses: actions/cache@v4
-        id: cache-ort
-        with:
-          path: onnxruntime
-          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v4
-
-      - name: Download ONNX Runtime
-        if: steps.cache-ort.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          mkdir -p onnxruntime
-          cd onnxruntime
-          if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
-            curl -L -o ort.zip "${{ matrix.ort_url }}"
-            unzip ort.zip
-          else
-            curl -L -o ort.tgz "${{ matrix.ort_url }}"
-            tar xzf ort.tgz
-            rm ort.tgz
-          fi
-          mv onnxruntime-*/* .
-          rmdir onnxruntime-*
-          # Create symlink for versioned library (not needed on Windows)
-          if [[ -n "${{ matrix.ort_link }}" ]]; then
-            ln -sf "${{ matrix.ort_lib }}" "lib/${{ matrix.ort_link }}"
-          fi
-
-      - name: Configure CMake
-        shell: bash
-        run: |
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DONNXRUNTIME_DIR=${{ github.workspace }}/onnxruntime \
-            -DLEAXER_QWEN_BUILD_TESTS=OFF
-
-      - name: Build
-        run: cmake --build build --config Release -j
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: leaxer-qwen3-tts-${{ matrix.artifact }}
-          path: build/${{ matrix.binary }}

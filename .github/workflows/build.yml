@@ -2,10 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main, refactor/onnx]
     tags: ['v*']
-  pull_request:
-    branches: [main]
 
 env:
   ONNXRUNTIME_VERSION: "1.20.0"
@@ -47,14 +44,19 @@ jobs:
           cd onnxruntime
           if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
             curl -L -o ort.zip "${{ matrix.ort_url }}"
-            unzip ort.zip
+            unzip -q ort.zip
+            rm ort.zip
           else
             curl -L -o ort.tgz "${{ matrix.ort_url }}"
             tar xzf ort.tgz
             rm ort.tgz
           fi
-          mv onnxruntime-*/* .
-          rmdir onnxruntime-*
+          # Move contents from extracted directory
+          EXTRACTED_DIR=$(ls -d onnxruntime-* 2>/dev/null | head -1)
+          if [[ -n "$EXTRACTED_DIR" && -d "$EXTRACTED_DIR" ]]; then
+            mv "$EXTRACTED_DIR"/* .
+            rmdir "$EXTRACTED_DIR"
+          fi
           # Create symlink for versioned library (not needed on Windows)
           if [[ -n "${{ matrix.ort_link }}" ]]; then
             ln -sf "${{ matrix.ort_lib }}" "lib/${{ matrix.ort_link }}"
