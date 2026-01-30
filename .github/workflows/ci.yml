@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, refactor/onnx]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  ONNXRUNTIME_VERSION: "1.20.0"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz
+          - os: macos-latest
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-osx-arm64-1.20.0.tgz
+          - os: windows-2022
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-win-x64-1.20.0.zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache ONNX Runtime
+        uses: actions/cache@v4
+        id: cache-ort
+        with:
+          path: onnxruntime
+          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}
+
+      - name: Download ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p onnxruntime
+          cd onnxruntime
+          if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
+            curl -L -o ort.zip "${{ matrix.ort_url }}"
+            unzip ort.zip
+            mv onnxruntime-*/* .
+          else
+            curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
+          fi
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: build-${{ matrix.os }}-${{ hashFiles('CMakeLists.txt', 'src/**', 'tests/**') }}
+          restore-keys: |
+            build-${{ matrix.os }}-
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DONNXRUNTIME_INCLUDE_DIRS=${{ github.workspace }}/onnxruntime/include \
+            -DONNXRUNTIME_LIBRARY=${{ github.workspace }}/onnxruntime/lib/libonnxruntime$([ "${{ matrix.os }}" == "windows-2022" ] && echo ".lib" || echo ".so") \
+            -DLEAXER_QWEN_BUILD_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build build --config Debug -j
+
+      - name: Run tests
+        shell: bash
+        run: |
+          cd build
+          ctest --output-on-failure -C Debug
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz
+            ort_lib: libonnxruntime.so.1.20.0
+            binary: leaxer-qwen3-tts
+          - os: macos-latest
+            artifact: macos-arm64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-osx-arm64-1.20.0.tgz
+            ort_lib: libonnxruntime.1.20.0.dylib
+            binary: leaxer-qwen3-tts
+          - os: windows-2022
+            artifact: windows-x64
+            ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-win-x64-1.20.0.zip
+            ort_lib: onnxruntime.dll
+            binary: leaxer-qwen3-tts.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache ONNX Runtime
+        uses: actions/cache@v4
+        id: cache-ort
+        with:
+          path: onnxruntime
+          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}
+
+      - name: Download ONNX Runtime
+        if: steps.cache-ort.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p onnxruntime
+          cd onnxruntime
+          if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
+            curl -L -o ort.zip "${{ matrix.ort_url }}"
+            unzip ort.zip
+            mv onnxruntime-*/* .
+          else
+            curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
+          fi
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DONNXRUNTIME_INCLUDE_DIRS=${{ github.workspace }}/onnxruntime/include \
+            -DONNXRUNTIME_LIBRARY=${{ github.workspace }}/onnxruntime/lib/${{ matrix.ort_lib }} \
+            -DLEAXER_QWEN_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: leaxer-qwen3-tts-${{ matrix.artifact }}
+          path: build/${{ matrix.binary }}
