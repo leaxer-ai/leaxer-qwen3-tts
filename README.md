@@ -7,7 +7,7 @@ Pure C++ implementation of Qwen3-TTS text-to-speech.
 Single binary that converts text to speech without Python runtime dependency.
 
 ```bash
-leaxer-qwen -m models/ -p "Hello world" -o output.wav
+leaxer-qwen3-tts -m models/ -p "Hello world" -o output.wav
 ```
 
 ## Status
@@ -32,7 +32,7 @@ cmake -B build
 cmake --build build
 
 # Run
-./build/leaxer-qwen -m models/ -p "Hello world" -o output.wav
+./build/leaxer-qwen3-tts -m models/ -p "Hello world" -o output.wav
 ```
 
 ## Architecture

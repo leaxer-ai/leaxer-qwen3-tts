@@ -1,4 +1,4 @@
-// leaxer-qwen: Pure C++ Qwen3-TTS implementation
+// leaxer-qwen3-tts: Pure C++ Qwen3-TTS implementation
 // Main CLI entry point
 
 #include "leaxer_qwen.h"
@@ -64,7 +64,7 @@ int main(int argc, char ** argv) {
             return 0;
         }
         if (arg == "-v" || arg == "--version") {
-            printf("leaxer-qwen version %s\n", leaxer_qwen_version());
+            printf("leaxer-qwen3-tts version %s\n", leaxer_qwen_version());
             leaxer_qwen_print_system_info();
             return 0;
         }
@@ -109,7 +109,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    printf("leaxer-qwen v%s\n", leaxer_qwen_version());
+    printf("leaxer-qwen3-tts v%s\n", leaxer_qwen_version());
     printf("Model: %s\n", model_path);
     printf("Prompt: %s\n", prompt);
     printf("Speaker: %s\n", speaker);
