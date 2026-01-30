@@ -152,11 +152,21 @@ target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_ONNX=1)
 
 # CoreML (Apple)
 if(LEAXER_COREML AND APPLE)
-    target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_COREML=1)
-    target_link_libraries(leaxer_qwen_lib PUBLIC
-        "-framework CoreML"
-        "-framework Foundation"
-    )
+    # Check if CoreML provider header exists (not all ONNX Runtime builds have it)
+    find_file(COREML_PROVIDER_HEADER coreml_provider_factory.h
+        PATHS ${ONNXRUNTIME_INCLUDE_DIRS} ${ONNXRUNTIME_INCLUDE_DIRS}/onnxruntime
+        NO_DEFAULT_PATH)
+    if(COREML_PROVIDER_HEADER)
+        target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_COREML=1)
+        target_link_libraries(leaxer_qwen_lib PUBLIC
+            "-framework CoreML"
+            "-framework Foundation"
+        )
+        message(STATUS "CoreML provider header found: ${COREML_PROVIDER_HEADER}")
+    else()
+        message(STATUS "CoreML provider header NOT found - CoreML disabled")
+        set(LEAXER_COREML OFF)
+    endif()
 endif()
 
 # CUDA (NVIDIA)

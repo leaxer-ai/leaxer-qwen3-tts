@@ -6,7 +6,7 @@
 #include "io/wav_reader.h"
 #include "io/mel.h"
 #include <onnxruntime/onnxruntime_cxx_api.h>
-#if defined(__APPLE__)
+#if defined(LEAXER_USE_COREML) && defined(__APPLE__)
 #include <onnxruntime/coreml_provider_factory.h>
 #endif
 
