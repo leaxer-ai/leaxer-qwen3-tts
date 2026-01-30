@@ -124,6 +124,7 @@ set(IO_SOURCES
 if(LEAXER_QWEN_USE_ONNX AND ONNXRUNTIME_FOUND)
     set(ONNX_SOURCES
         src/onnx/onnx_session.cpp
+        src/tts_onnx.cpp
     )
 else()
     set(ONNX_SOURCES "")
@@ -159,7 +160,7 @@ if(LEAXER_QWEN_USE_ONNX AND ONNXRUNTIME_FOUND)
     target_compile_definitions(leaxer_qwen_lib PUBLIC LEAXER_USE_ONNX=1)
 endif()
 
-# Main executable
+# Main executable (GGUF-based)
 add_executable(leaxer-qwen3-tts src/leaxer_qwen.cpp)
 target_link_libraries(leaxer-qwen3-tts PRIVATE leaxer_qwen_lib)
 
@@ -167,6 +168,16 @@ target_link_libraries(leaxer-qwen3-tts PRIVATE leaxer_qwen_lib)
 target_compile_definitions(leaxer-qwen3-tts PRIVATE
     LEAXER_QWEN_VERSION="${PROJECT_VERSION}"
 )
+
+# ONNX-based TTS executable (if ONNX support is enabled)
+if(LEAXER_QWEN_USE_ONNX AND ONNXRUNTIME_FOUND)
+    add_executable(leaxer-qwen3-tts-onnx src/main_onnx.cpp)
+    target_link_libraries(leaxer-qwen3-tts-onnx PRIVATE leaxer_qwen_lib)
+    target_compile_definitions(leaxer-qwen3-tts-onnx PRIVATE
+        LEAXER_QWEN_VERSION="${PROJECT_VERSION}"
+    )
+    install(TARGETS leaxer-qwen3-tts-onnx DESTINATION bin)
+endif()
 
 # Tests
 if(LEAXER_QWEN_BUILD_TESTS)
