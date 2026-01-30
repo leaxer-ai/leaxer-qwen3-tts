@@ -53,6 +53,7 @@ set(MODEL_SOURCES
     src/model/transformer_cached.cpp
     src/model/code_predictor.cpp
     src/model/qwen_tts.cpp
+    src/model/qwen_tts_interleaved.cpp
 )
 
 # Source files - io

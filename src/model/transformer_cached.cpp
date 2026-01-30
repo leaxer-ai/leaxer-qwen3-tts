@@ -34,6 +34,7 @@ struct ggml_tensor * swiglu_ffn(
 constexpr int NUM_HEADS = 16;
 constexpr int NUM_KV_HEADS = 8;
 constexpr int HEAD_DIM = 128;
+constexpr float ROPE_FREQ_BASE = 1000000.0f;  // Qwen3-TTS uses 1M, NOT 10K!
 
 // Compute attention scores with cached K/V
 // Q: [head_dim, q_len, num_heads] - queries for new token(s)
@@ -177,15 +178,18 @@ struct ggml_tensor * transformer_block_cached(
             pos_data[i] = start_pos + i;
         }
 
-        // Apply RoPE with freq_base=10000 (standard Qwen3 setting)
-        // Permute Q: [head_dim, seq_len, num_heads] -> [head_dim, num_heads, seq_len, 1] for ggml_rope
+        // Apply RoPE with freq_base=1000000 (Qwen3-TTS setting - NOT 10000!)
+        // ggml_rope_ext params: ctx, a, b, c, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow
+        // mode=0 for standard RoPE (Qwen3 uses interleaved M-RoPE but for TTS all 3 dims are same, so equivalent to standard)
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
-        Q = ggml_rope(ctx, Q, pos, head_dim, 0);  // Apply RoPE to all head_dim dimensions
+        Q = ggml_rope_ext(ctx, Q, pos, nullptr, head_dim, 0,
+                          0, ROPE_FREQ_BASE, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));  // Back to [head_dim, seq_len, num_heads]
 
         // Apply RoPE to K_new (before caching)
         K_new = ggml_cont(ctx, ggml_permute(ctx, K_new, 0, 2, 1, 3));
-        K_new = ggml_rope(ctx, K_new, pos, head_dim, 0);
+        K_new = ggml_rope_ext(ctx, K_new, pos, nullptr, head_dim, 0,
+                              0, ROPE_FREQ_BASE, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         K_new = ggml_cont(ctx, ggml_permute(ctx, K_new, 0, 2, 1, 3));  // Back to [head_dim, seq_len, num_kv_heads]
     }
 

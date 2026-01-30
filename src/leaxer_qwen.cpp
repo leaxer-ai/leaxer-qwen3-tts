@@ -416,11 +416,8 @@ struct leaxer_qwen_model * leaxer_qwen_load_model(
             vocoder_path = "vocoder.gguf";
         }
 
-        printf("Trying separate vocoder file: %s\n", vocoder_path.c_str());
-        fflush(stdout);
         if (!leaxer_qwen::io::load_vocoder_weights(vocoder_path.c_str(), &model->vocoder, model->ctx)) {
-            printf("Warning: vocoder not loaded - will output codec tokens only\n");
-            fflush(stdout);
+            fprintf(stderr, "Warning: vocoder not loaded - will output codec tokens only\n");
         } else {
             model->vocoder_loaded = true;
         }
@@ -620,96 +617,34 @@ std::vector<int32_t> tokenize(const std::string& text);
 }
 
 namespace model {
-int generate_tokens(
-    struct ggml_context * ctx,
-    const int * prompt_tokens,
-    int prompt_len,
-    struct ggml_tensor * embed_weight,
-    struct ggml_tensor * text_proj_fc1_weight,
-    struct ggml_tensor * text_proj_fc1_bias,
-    struct ggml_tensor * text_proj_fc2_weight,
-    struct ggml_tensor * text_proj_fc2_bias,
-    struct ggml_tensor ** layer_weights,
-    int n_layers,
-    struct ggml_tensor * norm_weight,
-    struct ggml_tensor * lm_head_weight,
-    int max_tokens,
-    float temperature,
-    int top_k,
-    float top_p,
-    int eos_token_id,
-    uint64_t * rng_state,
-    int * output_tokens);
-
-// Cached version - much faster for autoregressive generation
-int generate_tokens_cached(
-    const int * prompt_tokens,
-    int prompt_len,
-    struct ggml_tensor * embed_weight,
-    struct ggml_tensor * text_proj_fc1_weight,
-    struct ggml_tensor * text_proj_fc1_bias,
-    struct ggml_tensor * text_proj_fc2_weight,
-    struct ggml_tensor * text_proj_fc2_bias,
-    struct ggml_tensor ** layer_weights,
-    int n_layers,
-    struct ggml_tensor * norm_weight,
-    struct ggml_tensor * lm_head_weight,
-    int max_tokens,
-    float temperature,
-    int top_k,
-    float top_p,
-    int eos_token_id,
-    uint64_t * rng_state,
-    int * output_tokens);
-
-// NEW: Version with proper codec embedding combination AND hidden state capture
-// This is the CORRECT implementation that:
-// 1. Adds codec embeddings during prefill
-// 2. Captures hidden states for each generated token (for code_predictor)
-int generate_tokens_with_codec(
-    const int * prompt_tokens,
-    int prompt_len,
-    struct ggml_tensor * text_embed_weight,    // [text_vocab=151936, 2048]
-    struct ggml_tensor * codec_embed_weight,   // [codec_vocab=3072, 1024] - CRITICAL!
-    struct ggml_tensor * text_proj_fc1_weight,
-    struct ggml_tensor * text_proj_fc1_bias,
-    struct ggml_tensor * text_proj_fc2_weight,
-    struct ggml_tensor * text_proj_fc2_bias,
-    struct ggml_tensor ** layer_weights,
-    int n_layers,
-    struct ggml_tensor * norm_weight,
-    struct ggml_tensor * lm_head_weight,
-    int max_tokens,
-    float temperature,
-    int top_k,
-    float top_p,
-    int eos_token_id,
-    uint64_t * rng_state,
-    int * output_tokens,
-    float * hidden_states_out,  // OUTPUT: [max_codec_tokens, 1024] hidden states
-    int * n_hidden_out);        // OUTPUT: number of hidden states captured
-
-// Legacy version without hidden state capture
-int generate_tokens_with_codec(
-    const int * prompt_tokens,
-    int prompt_len,
+// NEW: Interleaved generation (CORRECT implementation)
+// Generates all 16 codebooks properly by interleaving talker and code predictor
+int generate_interleaved(
+    const int * text_tokens,
+    const int * codec_tokens,
+    int prefill_len,
     struct ggml_tensor * text_embed_weight,
-    struct ggml_tensor * codec_embed_weight,
     struct ggml_tensor * text_proj_fc1_weight,
     struct ggml_tensor * text_proj_fc1_bias,
     struct ggml_tensor * text_proj_fc2_weight,
     struct ggml_tensor * text_proj_fc2_bias,
-    struct ggml_tensor ** layer_weights,
-    int n_layers,
-    struct ggml_tensor * norm_weight,
-    struct ggml_tensor * lm_head_weight,
-    int max_tokens,
+    struct ggml_tensor * talker_codec_embedding,
+    struct ggml_tensor ** talker_layer_weights,
+    int n_talker_layers,
+    struct ggml_tensor * talker_norm_weight,
+    struct ggml_tensor * talker_lm_head_weight,
+    struct ggml_tensor ** codec_embeddings,
+    struct ggml_tensor ** code_pred_layer_weights,
+    struct ggml_tensor * code_pred_norm_weight,
+    struct ggml_tensor ** code_pred_output_heads,
+    const float * tts_pad_embed,
+    int max_frames,
     float temperature,
     int top_k,
     float top_p,
-    int eos_token_id,
     uint64_t * rng_state,
-    int * output_tokens);
+    int32_t * all_codes_out,
+    int * n_frames_out);
 }
 
 namespace vocoder {
@@ -785,19 +720,23 @@ float * tts_generate(
     int seed,
     size_t * n_samples_out
 ) {
-    // talker_codec_embedding is now used in generate_tokens_with_codec!
     using namespace leaxer_qwen;
 
     // Model dimensions
     constexpr int HIDDEN_DIM = 1024;
+    constexpr int NUM_CODEBOOKS = 16;
 
-    // Special token IDs (from qwen_tts.cpp)
+    // Special token IDs
     constexpr int IM_START_TOKEN_ID = 151644;
-    constexpr int IM_END_TOKEN_ID = 151645;
-    constexpr int TTS_BOS_TOKEN_ID = 151672;
-    // Codec EOS token from GGUF metadata (qwen3.tts.codec_eos_id)
-    // Note: CustomVoice model uses 2150, not Python config default of 4198
-    constexpr int CODEC_EOS_ID = 2150;
+    constexpr int TTS_PAD_TOKEN_ID = 151671;
+    constexpr int TTS_EOS_TOKEN_ID = 151673;
+    
+    // Codec special tokens
+    constexpr int CODEC_PAD_ID = 2148;
+    constexpr int CODEC_BOS_ID = 2149;
+    constexpr int CODEC_NOTHINK_ID = 2155;
+    constexpr int CODEC_THINK_BOS_ID = 2156;
+    constexpr int CODEC_THINK_EOS_ID = 2157;
 
     // Step 1: Tokenize input text
     std::string text_str(text);
@@ -809,30 +748,78 @@ float * tts_generate(
         return nullptr;
     }
 
-    // Estimate reasonable token count: ~20 tokens per text token
-    // This prevents infinite generation when EOS is out of LM head range
-    int estimated_max_tokens = (int)text_tokens.size() * 20 + 50;
-    if (estimated_max_tokens > 512) estimated_max_tokens = 512;  // Cap for memory
-    printf("Text tokens: %zu, estimated max codec tokens: %d\n",
-           text_tokens.size(), estimated_max_tokens);
-    fflush(stdout);
+    // Estimate frame count
+    int estimated_max_frames = (int)text_tokens.size() * 20 + 50;
+    if (estimated_max_frames > 512) estimated_max_frames = 512;
+    printf("Text tokens: %zu, estimated max frames: %d\n", text_tokens.size(), estimated_max_frames);
 
-    // Step 2: Build prompt with special tokens
-    // Format: <|im_start|> text_tokens <|im_end|> <TTS_BOS>
-    std::vector<int> prompt;
-    prompt.push_back(IM_START_TOKEN_ID);
+    // Step 2: Build PARALLEL text and codec prompt sequences
+    std::vector<int> text_prompt;
+    std::vector<int> codec_prompt;
+    
+    // Codec control prefix
+    text_prompt.push_back(IM_START_TOKEN_ID);
+    codec_prompt.push_back(CODEC_NOTHINK_ID);
+    text_prompt.push_back(TTS_PAD_TOKEN_ID);
+    codec_prompt.push_back(CODEC_THINK_BOS_ID);
+    text_prompt.push_back(TTS_PAD_TOKEN_ID);
+    codec_prompt.push_back(CODEC_THINK_EOS_ID);
+    
+    // Text content with codec_pad
     for (int32_t tok : text_tokens) {
-        prompt.push_back((int)tok);
+        text_prompt.push_back((int)tok);
+        codec_prompt.push_back(CODEC_PAD_ID);
     }
-    prompt.push_back(IM_END_TOKEN_ID);
-    prompt.push_back(TTS_BOS_TOKEN_ID);
+    
+    // End: tts_eos + pad, then tts_pad + codec_bos
+    text_prompt.push_back(TTS_EOS_TOKEN_ID);
+    codec_prompt.push_back(CODEC_PAD_ID);
+    text_prompt.push_back(TTS_PAD_TOKEN_ID);
+    codec_prompt.push_back(CODEC_BOS_ID);
 
-    // Step 3: Generate codec tokens using LLM
-    // Use estimated max to avoid generating forever when EOS is out of range
-    int max_gen_tokens = (int)prompt.size() + estimated_max_tokens;
-    int * generated_tokens = (int *)malloc(max_gen_tokens * sizeof(int));
-    if (!generated_tokens) {
-        fprintf(stderr, "Error: failed to allocate token buffer\n");
+    // Step 3: Pre-compute tts_pad_embed
+    float * tts_pad_embed = (float *)malloc(HIDDEN_DIM * sizeof(float));
+    if (!tts_pad_embed) {
+        fprintf(stderr, "Error: failed to allocate tts_pad_embed\n");
+        *n_samples_out = 0;
+        return nullptr;
+    }
+    
+    {
+        size_t embed_ctx_size = 64 * 1024 * 1024;
+        struct ggml_init_params params = { embed_ctx_size, nullptr, false };
+        struct ggml_context * embed_ctx = ggml_init(params);
+        if (!embed_ctx) {
+            free(tts_pad_embed);
+            *n_samples_out = 0;
+            return nullptr;
+        }
+        
+        struct ggml_tensor * pad_token = ggml_new_tensor_1d(embed_ctx, GGML_TYPE_I32, 1);
+        ((int32_t *)pad_token->data)[0] = TTS_PAD_TOKEN_ID;
+        
+        struct ggml_tensor * text_embed = ggml_get_rows(embed_ctx, embed_weight, pad_token);
+        struct ggml_tensor * proj = ggml_mul_mat(embed_ctx, text_proj_fc1_weight, text_embed);
+        struct ggml_tensor * bias1 = (text_proj_fc1_bias->type == GGML_TYPE_F16) 
+            ? ggml_cast(embed_ctx, text_proj_fc1_bias, GGML_TYPE_F32) : text_proj_fc1_bias;
+        proj = ggml_add(embed_ctx, proj, bias1);
+        proj = ggml_silu(embed_ctx, proj);
+        proj = ggml_mul_mat(embed_ctx, text_proj_fc2_weight, proj);
+        struct ggml_tensor * bias2 = (text_proj_fc2_bias->type == GGML_TYPE_F16)
+            ? ggml_cast(embed_ctx, text_proj_fc2_bias, GGML_TYPE_F32) : text_proj_fc2_bias;
+        proj = ggml_add(embed_ctx, proj, bias2);
+        
+        struct ggml_cgraph * graph = ggml_new_graph(embed_ctx);
+        ggml_build_forward_expand(graph, proj);
+        ggml_graph_compute_with_ctx(embed_ctx, graph, 1);
+        memcpy(tts_pad_embed, proj->data, HIDDEN_DIM * sizeof(float));
+        ggml_free(embed_ctx);
+    }
+
+    // Step 4: Allocate output buffer
+    int32_t * all_codes = (int32_t *)malloc(estimated_max_frames * NUM_CODEBOOKS * sizeof(int32_t));
+    if (!all_codes) {
+        free(tts_pad_embed);
         *n_samples_out = 0;
         return nullptr;
     }
@@ -840,223 +827,62 @@ float * tts_generate(
     // Initialize RNG
     uint64_t rng_state = (seed < 0) ? (uint64_t)time(nullptr) : (uint64_t)seed;
 
-    printf("Starting text generation (with KV cache + codec embedding combination + hidden state capture)...\n");
-    fflush(stdout);
-
-    // Allocate buffer for hidden states (needed by code_predictor)
-    // Max codec tokens = estimated_max_tokens
-    const int max_hidden_states = estimated_max_tokens;
-    float * hidden_states_buffer = (float *)malloc(max_hidden_states * HIDDEN_DIM * sizeof(float));
-    if (!hidden_states_buffer) {
-        fprintf(stderr, "Error: failed to allocate hidden states buffer\n");
-        free(generated_tokens);
-        *n_samples_out = 0;
-        return nullptr;
-    }
-    int n_hidden_states = 0;
-
-    // Use the NEW generation function with proper codec embedding combination
-    // AND hidden state capture for code_predictor
-    int n_generated = model::generate_tokens_with_codec(
-        prompt.data(),
-        (int)prompt.size(),
-        embed_weight,                    // text_embed_weight [151936, 2048]
-        talker_codec_embedding,          // codec_embed_weight [3072, 1024] - CRITICAL FIX!
-        text_proj_fc1_weight,
-        text_proj_fc1_bias,
-        text_proj_fc2_weight,
-        text_proj_fc2_bias,
+    // Step 5: Run INTERLEAVED generation (correct flow!)
+    printf("Running INTERLEAVED generation...\n");
+    int n_frames = 0;
+    int result = model::generate_interleaved(
+        text_prompt.data(),
+        codec_prompt.data(),
+        (int)text_prompt.size(),
+        embed_weight,
+        text_proj_fc1_weight, text_proj_fc1_bias,
+        text_proj_fc2_weight, text_proj_fc2_bias,
+        talker_codec_embedding,
         layer_weights,
         n_layers,
         norm_weight,
         lm_head_weight,
-        max_gen_tokens,
-        temperature,
-        top_k,
-        top_p,
-        CODEC_EOS_ID,
-        &rng_state,
-        generated_tokens,
-        hidden_states_buffer,  // OUTPUT: capture hidden states
-        &n_hidden_states       // OUTPUT: number of hidden states
-    );
-
-    printf("Captured %d hidden states for code predictor\n", n_hidden_states);
-    fflush(stdout);
-
-    if (n_generated <= (int)prompt.size()) {
-        fprintf(stderr, "Error: no tokens generated beyond prompt\n");
-        free(generated_tokens);
-        free(hidden_states_buffer);
-        *n_samples_out = 0;
-        return nullptr;
-    }
-
-    // Extract codec tokens (skip prompt, keep until EOS)
-    int codec_start = (int)prompt.size();
-    int codec_len = n_generated - codec_start;
-
-    // Debug: show generated tokens (first and last few)
-    printf("Generated tokens (codec portion, start=%d, len=%d):\n", codec_start, codec_len);
-    printf("  First 10: ");
-    for (int i = codec_start; i < std::min(n_generated, codec_start + 10); i++) {
-        printf("%d ", generated_tokens[i]);
-    }
-    printf("\n  Last 10: ");
-    for (int i = std::max(codec_start, n_generated - 10); i < n_generated; i++) {
-        printf("%d ", generated_tokens[i]);
-    }
-    printf("\n  EOS token would be: %d\n", CODEC_EOS_ID);
-
-    // Remove EOS token if present
-    if (codec_len > 0 && generated_tokens[n_generated - 1] == CODEC_EOS_ID) {
-        printf("  (Last token is EOS, removing it)\n");
-        codec_len--;
-    }
-
-    if (codec_len <= 0) {
-        fprintf(stderr, "Error: no codec tokens generated\n");
-        free(generated_tokens);
-        free(hidden_states_buffer);
-        *n_samples_out = 0;
-        return nullptr;
-    }
-
-    printf("Text generation complete. Generated %d tokens.\n", n_generated);
-    fflush(stdout);
-
-    // Step 4: Run code predictor to generate all 16 codebooks
-    // Convert generated tokens to semantic codes (codebook 0)
-    int seq_len = codec_len;
-    struct ggml_tensor * semantic_codes = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq_len);
-    int32_t * semantic_data = (int32_t *)semantic_codes->data;
-
-    // Create tensor for talker hidden states (for code predictor)
-    // Shape: [seq_len, hidden_dim] = [seq_len, 1024]
-    struct ggml_tensor * talker_hidden_states = nullptr;
-    if (n_hidden_states > 0 && hidden_states_buffer) {
-        // Adjust seq_len if we have fewer hidden states than codec tokens
-        // (first token from prefill doesn't have captured hidden state)
-        int hs_seq_len = (n_hidden_states < seq_len) ? n_hidden_states : seq_len;
-        if (hs_seq_len != seq_len) {
-            printf("Note: %d hidden states for %d codec tokens (first from prefill)\n", 
-                   n_hidden_states, seq_len);
-            // Use what we have - code predictor will handle any mismatch
-        }
-        
-        talker_hidden_states = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, HIDDEN_DIM, seq_len);
-        float * hs_data = (float *)talker_hidden_states->data;
-        
-        // Copy hidden states - fill any gaps with zeros or repeat last
-        for (int t = 0; t < seq_len; t++) {
-            int src_idx = (t < n_hidden_states) ? t : (n_hidden_states - 1);
-            if (src_idx >= 0) {
-                memcpy(&hs_data[t * HIDDEN_DIM], 
-                       &hidden_states_buffer[src_idx * HIDDEN_DIM], 
-                       HIDDEN_DIM * sizeof(float));
-            } else {
-                memset(&hs_data[t * HIDDEN_DIM], 0, HIDDEN_DIM * sizeof(float));
-            }
-        }
-        printf("Created talker_hidden_states tensor [%d, %d]\n", seq_len, HIDDEN_DIM);
-    } else {
-        printf("WARNING: No hidden states captured! Code predictor will use degraded mode.\n");
-    }
-
-    // Convert token IDs to codebook indices (0-2047)
-    // Codec tokens could be:
-    // 1. 0-2047 directly (if model outputs in codec space)
-    // 2. 151936-153983 (if model uses extended vocab)
-    // We detect based on the token range
-    constexpr int CODEC_VOCAB_START_HIGH = 151936;
-    constexpr int CODEC_VOCAB_SIZE = 2048;
-
-    // Check if tokens are in high range or low range
-    bool tokens_are_high_range = (generated_tokens[codec_start] >= CODEC_VOCAB_START_HIGH);
-    int codec_offset = tokens_are_high_range ? CODEC_VOCAB_START_HIGH : 0;
-
-    for (int t = 0; t < seq_len; t++) {
-        int token = generated_tokens[codec_start + t];
-        int code = token - codec_offset;
-        // Clamp to valid range
-        if (code < 0) code = 0;
-        if (code >= CODEC_VOCAB_SIZE) code = CODEC_VOCAB_SIZE - 1;
-        semantic_data[t] = code;
-    }
-
-    free(generated_tokens);
-
-    // codec_embeddings is now an array of 16 separate tensors passed in as parameter
-    // Each tensor: [hidden_dim, codebook_vocab] = [1024, 2048]
-
-    // Run code predictor to generate all 16 codebooks autoregressively
-    // Each codebook is processed and computed separately to save memory
-    // NOW with proper talker hidden states!
-    printf("Running code predictor (with talker hidden states)...\n");
-    fflush(stdout);
-    struct ggml_tensor * codes = model::code_predictor_forward(
-        ctx,
-        semantic_codes,
         codec_embeddings,
         code_pred_layer_weights,
         code_pred_norm_weight,
         code_pred_output_heads,
-        HIDDEN_DIM,
-        seq_len,
-        talker_hidden_states,       // NEW: talker hidden states for proper code prediction
-        talker_codec_embedding      // NEW: talker's codec embedding for cb0 lookup
+        tts_pad_embed,
+        estimated_max_frames,
+        temperature, top_k, top_p,
+        &rng_state,
+        all_codes,
+        &n_frames
     );
 
-    // Free hidden states buffer - no longer needed after creating tensor
-    free(hidden_states_buffer);
-    hidden_states_buffer = nullptr;
+    free(tts_pad_embed);
 
-    if (!codes) {
-        fprintf(stderr, "Error: code predictor failed\n");
+    if (result != 0 || n_frames <= 0) {
+        fprintf(stderr, "Error: interleaved generation failed\n");
+        free(all_codes);
         *n_samples_out = 0;
         return nullptr;
     }
-    printf("Code predictor complete.\n");
-    fflush(stdout);
 
-    // DEBUG: Dump codes to file for comparison with Python
-    {
-        FILE * f = fopen("debug_codes.bin", "wb");
-        if (f) {
-            // codes shape: [seq_len, 16] int32
-            fwrite(codes->data, sizeof(int32_t), seq_len * 16, f);
-            fclose(f);
-            printf("DEBUG: Dumped %d codes to debug_codes.bin\n", seq_len * 16);
-        }
-    }
+    printf("Generated %d frames × %d codebooks.\n", n_frames, NUM_CODEBOOKS);
 
-    // Step 5: Run vocoder to generate audio
-    // Total upsample factor:
-    //   ConvNeXt stages: 2 * 2 = 4x
-    //   Decoder stages: 8 * 5 * 4 * 3 = 480x
-    //   Total: 4 * 480 = 1920x
-    // Output audio length: seq_len * 1920 at 24kHz
-    constexpr int UPSAMPLE_FACTOR = 1920;  // 4 (ConvNeXt) * 480 (decoder)
-    size_t audio_len = seq_len * UPSAMPLE_FACTOR;
+    // Step 6: Create codes tensor for vocoder
+    struct ggml_tensor * codes = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, NUM_CODEBOOKS, n_frames);
+    memcpy(codes->data, all_codes, n_frames * NUM_CODEBOOKS * sizeof(int32_t));
+    free(all_codes);
+
+    // Step 7: Run vocoder
+    constexpr int UPSAMPLE_FACTOR = 1920;
+    size_t audio_len = n_frames * UPSAMPLE_FACTOR;
 
     float * audio = (float *)malloc(audio_len * sizeof(float));
     if (!audio) {
-        fprintf(stderr, "Error: failed to allocate audio buffer\n");
         *n_samples_out = 0;
         return nullptr;
     }
 
-    // Call full vocoder with all layers
-    printf("Running vocoder (seq_len=%d, audio_len=%zu)...\n", seq_len, audio_len);
-    fflush(stdout);
-    vocoder::vocoder_full_forward(
-        audio,
-        (const int32_t *)codes->data,
-        seq_len,
-        vocoder_weights
-    );
+    printf("Running vocoder (n_frames=%d, audio_len=%zu)...\n", n_frames, audio_len);
+    vocoder::vocoder_full_forward(audio, (const int32_t *)codes->data, n_frames, vocoder_weights);
 
-    // Step 6: Return audio samples
     *n_samples_out = audio_len;
     return audio;
 }

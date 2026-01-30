@@ -72,6 +72,7 @@ constexpr int CODE_PRED_KV_HEADS = 8;
 constexpr int NUM_CODEBOOKS = 16;          // Total codebooks (0-15)
 constexpr int NUM_PREDICTED_CODEBOOKS = 15; // Code predictor generates codebooks 1-15
 constexpr int CODEBOOK_VOCAB = 2048;
+constexpr float ROPE_FREQ_BASE = 1000000.0f;  // Qwen3-TTS uses 1M, NOT 10K!
 
 // Code predictor transformer layer
 // Same architecture as main transformer but for code refinement
@@ -128,20 +129,26 @@ struct ggml_tensor * code_pred_transformer_layer(
     }
 
     // Apply RoPE (Rotary Position Embeddings) AFTER Q/K norm
+    // Using rope_freq_base = 1,000,000 (Qwen3-TTS setting - NOT default 10,000!)
     {
+        const float rope_freq_base = 1000000.0f;  // Critical: Qwen3-TTS uses 1M
+        
         struct ggml_tensor * pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, seq_len);
         int32_t * pos_data = (int32_t *)pos->data;
         for (int i = 0; i < seq_len; i++) {
             pos_data[i] = start_pos + i;
         }
 
-        // Apply RoPE to Q and K
+        // Apply RoPE to Q and K with correct freq_base
+        // ggml_rope_ext params: ctx, a, b, c, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
-        Q = ggml_rope(ctx, Q, pos, head_dim, 0);
+        Q = ggml_rope_ext(ctx, Q, pos, nullptr, head_dim, 0,
+                          0, rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
 
         K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
-        K = ggml_rope(ctx, K, pos, head_dim, 0);
+        K = ggml_rope_ext(ctx, K, pos, nullptr, head_dim, 0,
+                          0, rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
     }
 
@@ -430,12 +437,7 @@ struct ggml_tensor * code_predictor_forward(
     struct ggml_tensor * talker_hidden_states,  // [seq_len, hidden_dim] - from talker (optional)
     struct ggml_tensor * talker_codec_embedding // Talker's codec embedding for cb0 lookup
 ) {
-    printf("  Running code predictor (FIXED: correct input format)\n");
-    printf("    seq_len=%d, hidden_dim=%d\n", seq_len, hidden_dim);
-    printf("    talker_hidden_states=%s, talker_codec_embedding=%s\n",
-           talker_hidden_states ? "provided" : "NULL",
-           talker_codec_embedding ? "provided" : "NULL");
-    fflush(stdout);
+    printf("  Running code predictor (%d frames)...\n", seq_len);
 
     // Validate inputs
     if (!codebook_0_tokens || !codec_embeddings || !layer_weights ||
@@ -552,11 +554,6 @@ struct ggml_tensor * code_predictor_forward(
             int token = argmax_suppress(logits, head_out_dim < CODEBOOK_VOCAB ? head_out_dim : CODEBOOK_VOCAB);
             all_codes[t * NUM_CODEBOOKS + cb] = token;
             
-            // Debug: warn if token would have been invalid
-            if (token > CODEC_VALID_MAX) {
-                printf("WARNING: sampled token %d > %d (should not happen after suppression)\n", token, CODEC_VALID_MAX);
-            }
-            
             // Embed the sampled token using codec_embedding[cb-1]
             // codec_embedding[i] is for codebook i+1, so codec_embedding[cb-1] is for codebook cb
             if (cb < NUM_CODEBOOKS && codec_embeddings[cb - 1]) {
@@ -566,10 +563,9 @@ struct ggml_tensor * code_predictor_forward(
             }
         }
 
-        // Progress indicator
-        if ((t + 1) % 20 == 0 || t == seq_len - 1) {
-            printf("    Frame %d/%d complete\n", t + 1, seq_len);
-            fflush(stdout);
+        // Progress indicator (every 50 frames)
+        if ((t + 1) % 50 == 0) {
+            printf("    %d/%d frames...\n", t + 1, seq_len);
         }
     }
 
@@ -580,62 +576,12 @@ struct ggml_tensor * code_predictor_forward(
     free(logits);
     free(cb0_embed);
 
-    // Debug: print first 20 tokens for each codebook
-    printf("  First 20 generated tokens per codebook:\n");
-    for (int cb = 0; cb < NUM_CODEBOOKS; cb++) {
-        printf("    CB%2d: ", cb);
-        int print_count = seq_len < 20 ? seq_len : 20;
-        for (int t = 0; t < print_count; t++) {
-            printf("%d ", all_codes[t * NUM_CODEBOOKS + cb]);
-        }
-        printf("\n");
-    }
-    fflush(stdout);
-    
-    // Debug: check for invalid tokens (should all be 0-2047)
-    int invalid_count = 0;
-    for (int t = 0; t < seq_len; t++) {
-        for (int cb = 0; cb < NUM_CODEBOOKS; cb++) {
-            int code = all_codes[t * NUM_CODEBOOKS + cb];
-            if (code > CODEC_VALID_MAX) {
-                if (invalid_count < 10) {
-                    printf("  WARNING: Invalid token at t=%d cb=%d: %d (> %d)\n", t, cb, code, CODEC_VALID_MAX);
-                }
-                invalid_count++;
-            }
-        }
-    }
-    if (invalid_count > 0) {
-        printf("  TOTAL INVALID TOKENS: %d (should be 0!)\n", invalid_count);
-    } else {
-        printf("  All tokens valid (0-%d range)\n", CODEC_VALID_MAX);
-    }
-    fflush(stdout);
-    
-    // Debug: print code distribution summary
-    printf("  Code distribution summary:\n");
-    for (int cb = 0; cb < NUM_CODEBOOKS; cb += 4) {
-        int min_code = CODEBOOK_VOCAB, max_code = 0;
-        long sum = 0;
-        for (int t = 0; t < seq_len; t++) {
-            int code = all_codes[t * NUM_CODEBOOKS + cb];
-            if (code < min_code) min_code = code;
-            if (code > max_code) max_code = code;
-            sum += code;
-        }
-        printf("    CB%2d: min=%4d, max=%4d, mean=%.1f\n",
-               cb, min_code, max_code, (float)sum / seq_len);
-    }
-    fflush(stdout);
-
     // Create output tensor
     struct ggml_tensor * output = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, NUM_CODEBOOKS, seq_len);
     memcpy(output->data, all_codes, NUM_CODEBOOKS * seq_len * sizeof(int32_t));
     free(all_codes);
 
-    printf("  Code predictor complete.\n");
-    fflush(stdout);
-
+    printf("  Code predictor complete (%d frames).\n", seq_len);
     return output;
 }
 
@@ -651,9 +597,7 @@ struct ggml_tensor * code_predictor_forward(
     int hidden_dim,
     int seq_len) {
     
-    printf("  WARNING: code_predictor_forward called without talker hidden states!\n");
-    printf("           Using degraded mode (zeros for talker hidden). This WILL produce poor results.\n");
-    fflush(stdout);
+    fprintf(stderr, "Warning: code_predictor called without talker hidden states (degraded mode)\n");
     
     // Call the full implementation with NULL for talker hidden states
     return code_predictor_forward(

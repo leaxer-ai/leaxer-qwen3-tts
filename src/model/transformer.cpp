@@ -108,11 +108,7 @@ struct ggml_tensor * transformer_block(
     const int num_kv_heads = 8;  // GQA: 8 KV heads shared across 16 Q heads
     const int head_dim = q_dim / num_heads;  // 2048/16 = 128
     const int kv_head_dim = kv_dim / num_kv_heads;  // 1024/8 = 128
-
-    // Debug output commented out to reduce noise
-    // printf("transformer_block: Q=[%lld,%lld], K=[%lld,%lld]\n",
-    //        (long long)Q->ne[0], (long long)Q->ne[1],
-    //        (long long)K->ne[0], (long long)K->ne[1]);
+    const float rope_freq_base = 1000000.0f;  // Qwen3-TTS uses 1M, NOT 10K!
 
     // First convert to 4D to separate heads, then permute
     // Q: [num_heads * head_dim, seq_len] = [head_dim, num_heads, seq_len, 1]  (view)
@@ -153,20 +149,20 @@ struct ggml_tensor * transformer_block(
             pos_data[i] = i;
         }
 
-        // Apply RoPE with freq_base=10000 (standard Qwen3 setting)
-        // Q: [head_dim, seq_len, num_heads] -> apply RoPE to head_dim pairs
-        // K: [head_dim, seq_len, num_kv_heads] -> apply RoPE to head_dim pairs
-        // ggml_rope expects: [n_dims, n_ctx, n_heads, batch] and applies RoPE to first n_rot dims
-        // We permute to [head_dim, num_heads, seq_len, 1] for ggml_rope, then permute back
+        // Apply RoPE with freq_base=1000000 (Qwen3-TTS setting - NOT 10000!)
+        // ggml_rope_ext params: ctx, a, b, c, n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow
+        // mode=0 for standard RoPE (Qwen3 uses interleaved M-RoPE but for TTS all 3 dims are same, so equivalent to standard)
 
         // Permute Q: [head_dim, seq_len, num_heads] -> [head_dim, num_heads, seq_len, 1]
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
-        Q = ggml_rope(ctx, Q, pos, head_dim, 0);  // Apply RoPE to all head_dim dimensions
+        Q = ggml_rope_ext(ctx, Q, pos, nullptr, head_dim, 0,
+                          0, rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));  // Back to [head_dim, seq_len, num_heads]
 
         // Permute K: [head_dim, seq_len, num_kv_heads] -> [head_dim, num_kv_heads, seq_len, 1]
         K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
-        K = ggml_rope(ctx, K, pos, head_dim, 0);  // Apply RoPE to all head_dim dimensions
+        K = ggml_rope_ext(ctx, K, pos, nullptr, head_dim, 0,
+                          0, rope_freq_base, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
         K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));  // Back to [head_dim, seq_len, num_kv_heads]
     }
 

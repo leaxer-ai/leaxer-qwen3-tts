@@ -47,9 +47,6 @@ int write_wav(const char* path, const float* audio, size_t n_samples, int sample
         norm_factor = 0.95f / peak;
     }
 
-    // Debug: print normalization info
-    printf("  wav: peak=%.4f, norm_factor=%.2f\n", peak, norm_factor);
-
     // Prepare header
     wav_header header;
     std::memcpy(header.riff, "RIFF", 4);

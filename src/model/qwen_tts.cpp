@@ -57,6 +57,10 @@ constexpr int TTS_EOS_TOKEN_ID = 151673;
 constexpr int CODEC_PAD_ID = 2148;
 constexpr int CODEC_BOS_ID = 2149;
 constexpr int CODEC_EOS_ID = 2150;
+constexpr int CODEC_THINK_ID = 2154;
+constexpr int CODEC_NOTHINK_ID = 2155;
+constexpr int CODEC_THINK_BOS_ID = 2156;
+constexpr int CODEC_THINK_EOS_ID = 2157;
 
 // Model dimensions (0.6B model)
 constexpr int TEXT_EMBED_DIM = 2048;
@@ -497,9 +501,8 @@ int generate_tokens(
         current_len++;
 
         // Progress indicator
-        if (current_len % 10 == 0) {
-            printf("  Generated %d tokens...\n", current_len);
-            fflush(stdout);
+        if (current_len % 100 == 0) {
+            printf("    %d tokens...\n", current_len);
         }
 
         // Check for EOS
@@ -894,8 +897,7 @@ int generate_tokens_cached(
     size_t decode_mem = 256ULL * 1024 * 1024;   // 256MB for decode (single token)
 
     // Phase 1: Prefill - process all prompt tokens
-    printf("  Prefilling %d prompt tokens...\n", prompt_len);
-    fflush(stdout);
+    printf("  Prefilling %d tokens...\n", prompt_len);
     {
         struct ggml_init_params params = {
             .mem_size = prefill_mem,
@@ -944,8 +946,7 @@ int generate_tokens_cached(
     }
 
     // Phase 2: Decode - generate tokens one at a time
-    printf("  Decoding tokens...\n");
-    fflush(stdout);
+    printf("  Decoding...\n");
     while (current_len < max_tokens) {
         struct ggml_init_params params = {
             .mem_size = decode_mem,
@@ -987,9 +988,8 @@ int generate_tokens_cached(
         output_tokens[current_len++] = next_token;
 
         // Progress indicator
-        if (current_len % 50 == 0) {
-            printf("  Generated %d tokens...\n", current_len);
-            fflush(stdout);
+        if (current_len % 100 == 0) {
+            printf("    %d tokens...\n", current_len);
         }
 
         // Check for EOS
@@ -999,7 +999,7 @@ int generate_tokens_cached(
     }
 
     KVCache::destroy(kv_cache);
-    printf("  Generated %d tokens total\n", current_len);
+    printf("  Generated %d tokens.\n", current_len);
     return current_len;
 }
 
@@ -1020,6 +1020,9 @@ int generate_tokens_cached(
 //
 // Parameters:
 //   prompt_tokens: text token IDs for prefill
+//   codec_tokens: codec token IDs for prefill (parallel to text tokens)
+//                 If NULL, uses CODEC_PAD_ID for all positions (old behavior)
+//                 If provided, must be same length as prompt_tokens
 //   codec_embed_weight: talker's codec embedding [3072, 1024]
 //   hidden_states_out: OUTPUT buffer for hidden states [max_codec_tokens, 1024]
 //                      If not NULL, receives hidden state for each generated codec token
@@ -1029,6 +1032,7 @@ int generate_tokens_cached(
 // ============================================================================
 int generate_tokens_with_codec(
     const int * prompt_tokens,
+    const int * codec_tokens,      // NEW: parallel codec tokens (or NULL for all PAD)
     int prompt_len,
     struct ggml_tensor * text_embed_weight,    // [text_vocab=151936, 2048]
     struct ggml_tensor * codec_embed_weight,   // [codec_vocab=3072, 1024] - CRITICAL!
@@ -1084,8 +1088,7 @@ int generate_tokens_with_codec(
     //   text_projection(text_embed) + codec_embedding(CODEC_PAD_ID)
     // We capture the hidden state at the last position for the first codec token
     // ========================================================================
-    printf("  Prefilling %d prompt tokens (with codec embedding combination)...\n", prompt_len);
-    fflush(stdout);
+    printf("  Prefilling %d tokens...\n", prompt_len);
     {
         struct ggml_init_params params = {
             .mem_size = prefill_mem,
@@ -1103,11 +1106,17 @@ int generate_tokens_with_codec(
         struct ggml_tensor * text_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, prompt_len);
         memcpy(text_ids->data, prompt_tokens, prompt_len * sizeof(int32_t));
 
-        // Create codec token tensor (all CODEC_PAD_ID for prefill)
+        // Create codec token tensor
+        // If codec_tokens provided, use them; otherwise fill with CODEC_PAD_ID
         struct ggml_tensor * codec_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, prompt_len);
         int32_t * codec_data = (int32_t *)codec_ids->data;
-        for (int i = 0; i < prompt_len; i++) {
-            codec_data[i] = CODEC_PAD_ID;  // Use pad token for all text positions
+        if (codec_tokens) {
+            memcpy(codec_data, codec_tokens, prompt_len * sizeof(int32_t));
+        } else {
+            // Legacy behavior: all CODEC_PAD_ID
+            for (int i = 0; i < prompt_len; i++) {
+                codec_data[i] = CODEC_PAD_ID;
+            }
         }
 
         // Forward pass with proper embedding combination
@@ -1140,7 +1149,6 @@ int generate_tokens_with_codec(
 
         if (next_token == eos_token_id) {
             KVCache::destroy(kv_cache);
-            printf("  Generated EOS at prefill\n");
             if (n_hidden_out) *n_hidden_out = hidden_idx;
             return current_len;
         }
@@ -1153,8 +1161,7 @@ int generate_tokens_with_codec(
     // codec token. We capture the hidden state for each generated token to
     // pass to the code predictor.
     // ========================================================================
-    printf("  Decoding tokens (codec domain) with hidden state capture...\n");
-    fflush(stdout);
+    printf("  Decoding...\n");
     while (current_len < max_tokens) {
         struct ggml_init_params params = {
             .mem_size = decode_mem,
@@ -1218,15 +1225,12 @@ int generate_tokens_with_codec(
         output_tokens[current_len++] = next_token;
 
         // Progress indicator
-        if (current_len % 50 == 0) {
-            printf("  Generated %d codec tokens (captured %d hidden states)...\n", 
-                   current_len - prompt_len, hidden_idx);
-            fflush(stdout);
+        if (current_len % 100 == 0) {
+            printf("    %d tokens...\n", current_len - prompt_len);
         }
 
         // Check for EOS
         if (next_token == eos_token_id) {
-            printf("  EOS reached at position %d\n", current_len);
             break;
         }
     }
@@ -1236,12 +1240,12 @@ int generate_tokens_with_codec(
     // Output number of hidden states captured
     if (n_hidden_out) *n_hidden_out = hidden_idx;
     
-    printf("  Generated %d tokens total (%d codec tokens, %d hidden states captured)\n", 
-           current_len, current_len - prompt_len, hidden_idx);
+    printf("  Generated %d codec tokens.\n", current_len - prompt_len);
     return current_len;
 }
 
 // Legacy version without hidden state capture (for backward compatibility)
+// Note: This version uses all CODEC_PAD_ID for prefill (old behavior)
 int generate_tokens_with_codec(
     const int * prompt_tokens,
     int prompt_len,
@@ -1263,9 +1267,12 @@ int generate_tokens_with_codec(
     uint64_t * rng_state,
     int * output_tokens) {
     
-    // Call the full version without hidden state capture
+    // Call the full version without codec tokens or hidden state capture
+    // (uses all CODEC_PAD_ID for prefill - legacy behavior)
     return generate_tokens_with_codec(
-        prompt_tokens, prompt_len,
+        prompt_tokens,
+        nullptr,  // No codec tokens = use all CODEC_PAD_ID
+        prompt_len,
         text_embed_weight, codec_embed_weight,
         text_proj_fc1_weight, text_proj_fc1_bias,
         text_proj_fc2_weight, text_proj_fc2_bias,
