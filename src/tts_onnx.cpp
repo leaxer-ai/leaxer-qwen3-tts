@@ -159,8 +159,8 @@ std::vector<float> TTSEngine::synthesize(const std::string& text,
     
     std::vector<int64_t> token_ids;
     
-    // Add TTS BOS token
-    token_ids.push_back(onnx_config::TTS_BOS);
+    // Build proper prompt format: [<|im_start|>, ...text..., <|im_end|>, <tts_text_bos>]
+    token_ids.push_back(onnx_config::IM_START);
     
     // Tokenize text using BPE tokenizer
     if (io::is_tokenizer_ready()) {
@@ -183,8 +183,16 @@ std::vector<float> TTSEngine::synthesize(const std::string& text,
         }
     }
     
-    // Add TTS EOS token
-    token_ids.push_back(onnx_config::TTS_EOS);
+    // Add end tokens
+    token_ids.push_back(onnx_config::IM_END);
+    token_ids.push_back(onnx_config::TTS_BOS);
+    
+    std::cout << "[TTSEngine] Full prompt: [";
+    for (size_t i = 0; i < token_ids.size(); i++) {
+        std::cout << token_ids[i];
+        if (i < token_ids.size() - 1) std::cout << ", ";
+    }
+    std::cout << "]" << std::endl;
     
     return synthesize_tokens(token_ids, params);
 }
@@ -247,32 +255,80 @@ std::vector<float> TTSEngine::synthesize_tokens(const std::vector<int64_t>& toke
 // ===========================================================================
 
 std::vector<float> TTSEngine::build_prompt_embeddings(const std::vector<int64_t>& text_tokens) {
-    // Build the full prompt embedding sequence:
-    // [text_embeds] + [codec_bos_embed] + [codec_control_tokens]
+    // Build the prompt embedding sequence following Python's build_talker_inputs_np():
+    // Key insight: text embeddings and codec embeddings are ADDED at each position, not concatenated!
+    //
+    // Structure:
+    //   Position [0..2]:  tts_pad_embed + [codec_nothink, codec_think_bos, codec_think_eos]
+    //   Position [3]:     tts_bos_embed + codec_pad_embed
+    //   Position [4..N+3]: text_embed[i] + codec_pad_embed  (for each text token)
+    //   Position [N+4]:   tts_eos_embed + codec_pad_embed
+    //   Position [N+5]:   tts_pad_embed + codec_bos_embed  (start of generation)
     
-    // 1. Project text tokens to embeddings
+    const size_t H = onnx_config::HIDDEN_SIZE;
+    
+    // 1. Get all the TTS special embeddings via text_project
+    std::vector<int64_t> tts_special_ids = {
+        onnx_config::TTS_BOS,  // tts_text_bos
+        onnx_config::TTS_EOS,  // tts_text_eod
+        onnx_config::TTS_PAD   // tts_pad
+    };
+    std::vector<float> tts_embeds = run_text_project(tts_special_ids);
+    
+    // Split into individual embeddings
+    std::vector<float> tts_bos_embed(tts_embeds.begin(), tts_embeds.begin() + H);
+    std::vector<float> tts_eos_embed(tts_embeds.begin() + H, tts_embeds.begin() + 2*H);
+    std::vector<float> tts_pad_embed(tts_embeds.begin() + 2*H, tts_embeds.begin() + 3*H);
+    
+    // 2. Get codec control embeddings
+    std::vector<float> codec_nothink_embed = run_codec_embed(onnx_config::CODEC_NOTHINK);
+    std::vector<float> codec_think_bos_embed = run_codec_embed(onnx_config::CODEC_THINK_BOS);
+    std::vector<float> codec_think_eos_embed = run_codec_embed(onnx_config::CODEC_THINK_EOS);
+    std::vector<float> codec_pad_embed = run_codec_embed(onnx_config::CODEC_PAD);
+    std::vector<float> codec_bos_embed = run_codec_embed(onnx_config::CODEC_BOS);
+    
+    // 3. Get text embeddings (project all text tokens)
     std::vector<float> text_embeds = run_text_project(text_tokens);
     size_t text_len = text_tokens.size();
     
-    // 2. Get codec BOS embedding
-    std::vector<float> codec_bos_embed = run_codec_embed(onnx_config::CODEC_BOS);
+    // 4. Build the combined prompt embeddings
+    // Total positions: 3 (control) + 1 (tts_bos) + text_len + 1 (tts_eos) + 1 (codec_bos) = text_len + 6
+    size_t total_positions = text_len + 6;
+    std::vector<float> prompt_embeds(total_positions * H, 0.0f);
     
-    // 3. Build full prompt: text + codec_bos + codec_nothink (for non-thinking mode)
-    std::vector<float> codec_nothink_embed = run_codec_embed(onnx_config::CODEC_NOTHINK);
+    // Helper to ADD two embeddings at a position
+    auto add_embeddings = [&](size_t pos, const std::vector<float>& text_emb, const std::vector<float>& codec_emb) {
+        for (size_t i = 0; i < H; ++i) {
+            prompt_embeds[pos * H + i] = text_emb[i] + codec_emb[i];
+        }
+    };
     
-    // Concatenate: [text_embeds, codec_bos, codec_nothink]
-    size_t total_tokens = text_len + 2;  // text + codec_bos + codec_nothink
-    std::vector<float> prompt_embeds;
-    prompt_embeds.reserve(total_tokens * onnx_config::HIDDEN_SIZE);
+    // Position 0: tts_pad + codec_nothink
+    add_embeddings(0, tts_pad_embed, codec_nothink_embed);
     
-    // Add text embeddings
-    prompt_embeds.insert(prompt_embeds.end(), text_embeds.begin(), text_embeds.end());
+    // Position 1: tts_pad + codec_think_bos
+    add_embeddings(1, tts_pad_embed, codec_think_bos_embed);
     
-    // Add codec BOS
-    prompt_embeds.insert(prompt_embeds.end(), codec_bos_embed.begin(), codec_bos_embed.end());
+    // Position 2: tts_pad + codec_think_eos
+    add_embeddings(2, tts_pad_embed, codec_think_eos_embed);
     
-    // Add codec NOTHINK (disable thinking mode)
-    prompt_embeds.insert(prompt_embeds.end(), codec_nothink_embed.begin(), codec_nothink_embed.end());
+    // Position 3: tts_bos + codec_pad
+    add_embeddings(3, tts_bos_embed, codec_pad_embed);
+    
+    // Positions 4 to text_len+3: text_embed[i] + codec_pad
+    for (size_t i = 0; i < text_len; ++i) {
+        std::vector<float> text_pos_embed(text_embeds.begin() + i*H, text_embeds.begin() + (i+1)*H);
+        add_embeddings(4 + i, text_pos_embed, codec_pad_embed);
+    }
+    
+    // Position text_len+4: tts_eos + codec_pad
+    add_embeddings(text_len + 4, tts_eos_embed, codec_pad_embed);
+    
+    // Position text_len+5: tts_pad + codec_bos (start of generation)
+    add_embeddings(text_len + 5, tts_pad_embed, codec_bos_embed);
+    
+    std::cout << "[TTSEngine] Built prompt: " << total_positions << " positions "
+              << "(3 control + 1 bos + " << text_len << " text + 1 eos + 1 codec_bos)" << std::endl;
     
     return prompt_embeds;
 }
