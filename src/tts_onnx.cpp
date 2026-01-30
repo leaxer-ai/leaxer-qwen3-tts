@@ -5,9 +5,9 @@
 #include "io/tokenizer.h"
 #include "io/wav_reader.h"
 #include "io/mel.h"
-#include <onnxruntime/onnxruntime_cxx_api.h>
+#include <onnxruntime_cxx_api.h>
 #if defined(LEAXER_USE_COREML) && defined(__APPLE__)
-#include <onnxruntime/coreml_provider_factory.h>
+#include <coreml_provider_factory.h>
 #endif
 
 #include <algorithm>

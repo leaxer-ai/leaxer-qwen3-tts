@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <cctype>
 #include <cstring>
+#include <climits>
 #include <regex>
 
 namespace leaxer_qwen {
