@@ -38,7 +38,7 @@ jobs:
         id: cache-ort
         with:
           path: onnxruntime
-          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v3
+          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v4
 
       - name: Download ONNX Runtime
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -49,14 +49,16 @@ jobs:
           if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
             curl -L -o ort.zip "${{ matrix.ort_url }}"
             unzip ort.zip
-            mv onnxruntime-*/* .
           else
-            curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
-            # Create symlink for versioned library
-            cd lib
-            if [[ -n "${{ matrix.ort_link }}" ]]; then
-              ln -sf "${{ matrix.ort_lib }}" "${{ matrix.ort_link }}"
-            fi
+            curl -L -o ort.tgz "${{ matrix.ort_url }}"
+            tar xzf ort.tgz
+            rm ort.tgz
+          fi
+          mv onnxruntime-*/* .
+          rmdir onnxruntime-*
+          # Create symlink for versioned library (not needed on Windows)
+          if [[ -n "${{ matrix.ort_link }}" ]]; then
+            ln -sf "${{ matrix.ort_lib }}" "lib/${{ matrix.ort_link }}"
           fi
 
       - name: Cache CMake build
@@ -119,7 +121,7 @@ jobs:
         id: cache-ort
         with:
           path: onnxruntime
-          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v3
+          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v4
 
       - name: Download ONNX Runtime
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -130,14 +132,16 @@ jobs:
           if [[ "${{ matrix.os }}" == "windows-2022" ]]; then
             curl -L -o ort.zip "${{ matrix.ort_url }}"
             unzip ort.zip
-            mv onnxruntime-*/* .
           else
-            curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
-            # Create symlink for versioned library
-            cd lib
-            if [[ -n "${{ matrix.ort_link }}" ]]; then
-              ln -sf "${{ matrix.ort_lib }}" "${{ matrix.ort_link }}"
-            fi
+            curl -L -o ort.tgz "${{ matrix.ort_url }}"
+            tar xzf ort.tgz
+            rm ort.tgz
+          fi
+          mv onnxruntime-*/* .
+          rmdir onnxruntime-*
+          # Create symlink for versioned library (not needed on Windows)
+          if [[ -n "${{ matrix.ort_link }}" ]]; then
+            ln -sf "${{ matrix.ort_lib }}" "lib/${{ matrix.ort_link }}"
           fi
 
       - name: Configure CMake
