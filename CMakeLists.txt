@@ -152,6 +152,16 @@ if(LEAXER_QWEN_BUILD_TESTS)
     add_executable(test_onnx tests/test_onnx.cpp)
     target_link_libraries(test_onnx PRIVATE leaxer_qwen_lib)
     add_test(NAME onnx COMMAND test_onnx)
+
+    # WAV reader test
+    add_executable(test_wav_reader tests/test_wav_reader.cpp)
+    target_link_libraries(test_wav_reader PRIVATE leaxer_qwen_lib)
+    add_test(NAME wav_reader COMMAND test_wav_reader)
+
+    # Mel spectrogram test
+    add_executable(test_mel tests/test_mel.cpp)
+    target_link_libraries(test_mel PRIVATE leaxer_qwen_lib)
+    add_test(NAME mel COMMAND test_mel)
 endif()
 
 # =============================================================================

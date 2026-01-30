@@ -183,9 +183,11 @@ std::vector<float> MelExtractor::extract(const std::vector<float>& audio) {
     if (audio.empty()) return {};
     
     int audio_len = static_cast<int>(audio.size());
-    num_frames_ = (audio_len - config_.win_size) / config_.hop_size + 1;
-    if (num_frames_ <= 0) {
+    // Handle short audio (shorter than window) - produce at least 1 frame
+    if (audio_len < config_.win_size) {
         num_frames_ = 1;
+    } else {
+        num_frames_ = static_cast<size_t>((audio_len - config_.win_size) / config_.hop_size + 1);
     }
     
     int n_fft_bins = config_.n_fft / 2 + 1;
