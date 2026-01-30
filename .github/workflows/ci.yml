@@ -17,10 +17,16 @@ jobs:
         include:
           - os: ubuntu-latest
             ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz
+            ort_lib: libonnxruntime.so.1.20.0
+            ort_link: libonnxruntime.so
           - os: macos-latest
             ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-osx-arm64-1.20.0.tgz
+            ort_lib: libonnxruntime.1.20.0.dylib
+            ort_link: libonnxruntime.dylib
           - os: windows-2022
             ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-win-x64-1.20.0.zip
+            ort_lib: onnxruntime.dll
+            ort_link: ""
 
     runs-on: ${{ matrix.os }}
 
@@ -32,7 +38,7 @@ jobs:
         id: cache-ort
         with:
           path: onnxruntime
-          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v2
+          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v3
 
       - name: Download ONNX Runtime
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -46,13 +52,11 @@ jobs:
             mv onnxruntime-*/* .
           else
             curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
-          fi
-          # Create symlinks for versioned libraries
-          cd lib
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            ln -sf libonnxruntime.*.dylib libonnxruntime.dylib
-          elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            ln -sf libonnxruntime.so.* libonnxruntime.so
+            # Create symlink for versioned library
+            cd lib
+            if [[ -n "${{ matrix.ort_link }}" ]]; then
+              ln -sf "${{ matrix.ort_lib }}" "${{ matrix.ort_link }}"
+            fi
           fi
 
       - name: Cache CMake build
@@ -89,14 +93,20 @@ jobs:
           - os: ubuntu-latest
             artifact: linux-x64
             ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-linux-x64-1.20.0.tgz
+            ort_lib: libonnxruntime.so.1.20.0
+            ort_link: libonnxruntime.so
             binary: leaxer-qwen3-tts
           - os: macos-latest
             artifact: macos-arm64
             ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-osx-arm64-1.20.0.tgz
+            ort_lib: libonnxruntime.1.20.0.dylib
+            ort_link: libonnxruntime.dylib
             binary: leaxer-qwen3-tts
           - os: windows-2022
             artifact: windows-x64
             ort_url: https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/onnxruntime-win-x64-1.20.0.zip
+            ort_lib: onnxruntime.dll
+            ort_link: ""
             binary: leaxer-qwen3-tts.exe
 
     runs-on: ${{ matrix.os }}
@@ -109,7 +119,7 @@ jobs:
         id: cache-ort
         with:
           path: onnxruntime
-          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v2
+          key: ort-${{ matrix.os }}-${{ env.ONNXRUNTIME_VERSION }}-v3
 
       - name: Download ONNX Runtime
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -123,13 +133,11 @@ jobs:
             mv onnxruntime-*/* .
           else
             curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
-          fi
-          # Create symlinks for versioned libraries
-          cd lib
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            ln -sf libonnxruntime.*.dylib libonnxruntime.dylib
-          elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            ln -sf libonnxruntime.so.* libonnxruntime.so
+            # Create symlink for versioned library
+            cd lib
+            if [[ -n "${{ matrix.ort_link }}" ]]; then
+              ln -sf "${{ matrix.ort_lib }}" "${{ matrix.ort_link }}"
+            fi
           fi
 
       - name: Configure CMake

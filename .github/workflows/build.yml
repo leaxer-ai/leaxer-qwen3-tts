@@ -51,13 +51,11 @@ jobs:
             mv onnxruntime-*/* .
           else
             curl -L "${{ matrix.ort_url }}" | tar xz --strip-components=1
-          fi
-          # Create symlinks for versioned libraries
-          cd lib
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            ln -sf libonnxruntime.*.dylib libonnxruntime.dylib
-          elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            ln -sf libonnxruntime.so.* libonnxruntime.so
+            # Create symlink for versioned library
+            cd lib
+            if [[ -n "${{ matrix.ort_link }}" ]]; then
+              ln -sf "${{ matrix.ort_lib }}" "${{ matrix.ort_link }}"
+            fi
           fi
 
       - name: Configure CMake
