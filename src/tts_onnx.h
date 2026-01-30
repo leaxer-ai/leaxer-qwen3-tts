@@ -32,9 +32,13 @@ namespace onnx_config {
     constexpr int SUBCODE_VOCAB_SIZE = 2048;
     
     // Special token IDs (TTS tokens)
-    constexpr int64_t TTS_BOS = 151672;
-    constexpr int64_t TTS_EOS = 151673;
-    constexpr int64_t TTS_PAD = 151671;
+    constexpr int64_t TTS_BOS = 151672;       // <tts_text_bos>
+    constexpr int64_t TTS_EOS = 151673;       // <tts_text_eod>
+    constexpr int64_t TTS_PAD = 151671;       // <tts_pad>
+    
+    // Chat tokens (for prompt formatting)
+    constexpr int64_t IM_START = 151644;      // <|im_start|>
+    constexpr int64_t IM_END = 151645;        // <|im_end|>
     
     // Codec tokens (within talker vocab of 3072)
     constexpr int64_t CODEC_BOS = 2149;

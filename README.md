@@ -1,6 +1,6 @@
 # leaxer-qwen3-tts
 
-Pure C++ implementation of Qwen3-TTS text-to-speech.
+C++ implementation of Qwen3-TTS text-to-speech using ONNX runtime.
 
 ## Goal
 
@@ -14,20 +14,13 @@ leaxer-qwen3-tts -m models/ -p "Hello world" -o output.wav
 
 🚧 **Work in Progress** — Refactoring to ONNX Runtime
 
-### Approach
-
-Using ONNX Runtime for reliable inference:
-- Pre-exported ONNX models handle M-RoPE, attention, KV-cache correctly
-- C++ orchestrates the generation loop
-- No manual tensor operations = fewer bugs
+## Dependencies
+- ONNX Runtime (onnxruntime-cpp)
+- CMake 3.16+
 
 ## Building
 
 ```bash
-# Dependencies
-# - ONNX Runtime (onnxruntime-cpp)
-# - CMake 3.16+
-
 cmake -B build
 cmake --build build
 
@@ -53,18 +46,8 @@ Text → Tokenizer → Talker ONNX → Code Predictor ONNX → Vocoder ONNX → 
 | `speaker_encoder.onnx` | Extract speaker embedding |
 
 ## Credits
-
-**ONNX models from:**
+- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba — Apache-2.0 
 - [zukky/Qwen3-TTS-ONNX-DLL](https://huggingface.co/zukky/Qwen3-TTS-ONNX-DLL) — Apache-2.0
-- Huge thanks to zukky for the ONNX export work!
-
-**Original model:**
-- [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by Alibaba — Apache-2.0
-
-## References
-
-- [ONNX Runtime](https://onnxruntime.ai/) — Inference engine
-- [Qwen3-TTS Paper](https://arxiv.org/abs/2505.XXXXX) — Model architecture
 
 ## License
 
