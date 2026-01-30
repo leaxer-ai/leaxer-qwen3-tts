@@ -760,6 +760,14 @@ std::vector<std::array<int64_t, 16>> TTSEngine::generate_codes(
     
     // Phase 2: Autoregressive generation loop
     for (int step = 0; step < params.max_new_tokens; ++step) {
+        // Suppress special tokens (2048-3071 except EOS=2150)
+        // These are control tokens that shouldn't be sampled during audio generation
+        for (int i = 2048; i < 3072; ++i) {
+            if (i != onnx_config::CODEC_EOS) {
+                last_logits[i] = -std::numeric_limits<float>::infinity();
+            }
+        }
+        
         // Sample codebook 0 token from logits
         int64_t code0 = sample_token(last_logits, params);
         
