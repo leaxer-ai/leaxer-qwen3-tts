@@ -6,6 +6,9 @@
 #include "io/wav_reader.h"
 #include "io/mel.h"
 #include <onnxruntime/onnxruntime_cxx_api.h>
+#if defined(__APPLE__)
+#include <onnxruntime/coreml_provider_factory.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -182,18 +185,20 @@ std::unique_ptr<Ort::Session> TTSEngine::load_model(const std::string& filename)
         // Try CoreML (Apple Silicon GPU/Neural Engine)
         if (!provider_added) {
             try {
-                std::unordered_map<std::string, std::string> coreml_options;
-                coreml_options["ModelFormat"] = "MLProgram";
-                coreml_options["MLComputeUnits"] = "ALL";
-                coreml_options["RequireStaticInputShapes"] = "0";
-                
-                opts.AppendExecutionProvider("CoreML", coreml_options);
+                // Use MLProgram (CoreML 5+) with all compute units (CPU+GPU+ANE)
+                uint32_t coreml_flags = COREML_FLAG_CREATE_MLPROGRAM;
+                Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CoreML(opts, coreml_flags));
                 provider_added = true;
                 if (!logged_provider) {
                     std::cerr << "[TTSEngine] CoreML Execution Provider enabled (Apple GPU/ANE)" << std::endl;
                 }
             } catch (const Ort::Exception& e) {
-                // CoreML EP not available
+                // CoreML EP failed - log the error
+                static bool logged_coreml_error = false;
+                if (!logged_coreml_error) {
+                    std::cerr << "[TTSEngine] CoreML EP failed: " << e.what() << std::endl;
+                    logged_coreml_error = true;
+                }
             }
         }
 #endif
