@@ -50,3 +50,6 @@ Thumbs.db
 # Todo
 .todo/
 DEVELOPMENT.md
+
+# Dependencies (built from source)
+deps/
